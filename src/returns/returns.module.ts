@@ -18,6 +18,7 @@ import {
 import { Supplier, SupplierSchema } from '../suppliers/schemas/supplier.schema';
 import { StockMovementsModule } from '../stock-movements/stock-movements.module';
 import { CustomersModule } from '../customers/customers.module';
+import { SuppliersModule } from '../suppliers/suppliers.module';
 
 @Module({
   imports: [
@@ -29,7 +30,8 @@ import { CustomersModule } from '../customers/customers.module';
       { name: 'Supplier', schema: SupplierSchema },
     ]),
     StockMovementsModule, // ربط محرك الـ Audit Trail للمخزن
-    CustomersModule, // ربط محرك تعديل الديون المالي للعملاء
+    CustomersModule,
+    SuppliersModule, // ربط محرك تعديل الديون المالي للعملاء
   ],
   controllers: [ReturnsController],
   providers: [ReturnsService],

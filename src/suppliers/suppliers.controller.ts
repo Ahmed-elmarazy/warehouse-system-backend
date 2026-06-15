@@ -10,6 +10,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -21,6 +22,7 @@ import { SuppliersService } from './suppliers.service';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { SupplierQueryDto } from './dto/supplier-query.dto';
+import { CreateSupplierPaymentDto } from './dto/create-supplier-payment.dto';
 import { AuthGuard } from '../auth/guards/auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -43,6 +45,44 @@ export class SuppliersController {
       success: true,
       message: 'Supplier registered successfully',
       data: supplier,
+    };
+  }
+
+  // ─── 🌟 [API جديد] دفع دفعة مالية للمورد وتسديد الديون 🌟 ───
+  @Post(':id/payments')
+  @Roles(Role.OWNER)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Pay a layout/payment to a specific supplier (Owner only)',
+  })
+  @ApiParam({ name: 'id', description: 'Supplier MongoDB ObjectId' })
+  async createPayment(
+    @Param('id') id: string,
+    @Body() dto: CreateSupplierPaymentDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.sub; // استخراج الـ User ID من الـ Request Token التابع للـ AuthGuard
+    const payment = await this.suppliersService.createPayment(id, dto, userId);
+    return {
+      success: true,
+      message: 'Payment registered and supplier balance updated successfully',
+      data: payment,
+    };
+  }
+
+  // ─── 🌟 [API جديد] جلب كشف الحساب التفصيلي للمورد 🌟 ───
+  @Get(':id/statement')
+  @Roles(Role.OWNER, Role.EMPLOYEE)
+  @ApiOperation({
+    summary: 'Get detailed financial statement history for a supplier',
+  })
+  @ApiParam({ name: 'id', description: 'Supplier MongoDB ObjectId' })
+  async getStatement(@Param('id') id: string) {
+    const statement = await this.suppliersService.getStatement(id);
+    return {
+      success: true,
+      message: 'Supplier financial statement retrieved successfully',
+      data: statement,
     };
   }
 
@@ -98,10 +138,6 @@ export class SuppliersController {
   @ApiParam({ name: 'id', description: 'Supplier MongoDB ObjectId' })
   async remove(@Param('id') id: string) {
     const result = await this.suppliersService.remove(id);
-    return {
-      success: true,
-      message: result.message,
-      data: null,
-    };
+    return { success: true, message: result.message, data: null };
   }
 }

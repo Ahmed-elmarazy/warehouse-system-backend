@@ -19,6 +19,7 @@ import { CreateSupplierReturnDto } from './dto/create-supplier-return.dto';
 import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { CustomersService } from '../customers/customers.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { SuppliersService } from '../suppliers/suppliers.service';
 
 @Injectable()
 export class ReturnsService {
@@ -34,6 +35,7 @@ export class ReturnsService {
     @InjectConnection() private readonly connection: Connection,
     private readonly stockMovementsService: StockMovementsService,
     private readonly customersService: CustomersService,
+    private readonly suppliersService: SuppliersService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -245,7 +247,6 @@ export class ReturnsService {
   ): Promise<SupplierReturnDocument> {
     const session = await this.connection.startSession();
     session.startTransaction();
-
     try {
       const supplier = await this.supplierModel
         .findOne({ _id: new Types.ObjectId(dto.supplierId), isActive: true })
@@ -262,57 +263,51 @@ export class ReturnsService {
           .session(session);
         if (!product)
           throw new NotFoundException(`Product ${item.productId} not found.`);
-
         if (product.quantityInPieces < item.quantity) {
           throw new BadRequestException(
             `Insufficient stock for "${product.name}". Available: ${product.quantityInPieces} pcs.`,
           );
         }
-
         const itemTotal = item.quantity * item.price;
         totalReturnAmount += itemTotal;
-
         processedItems.push({
           productId: product._id,
           quantity: item.quantity,
           price: item.price,
           total: itemTotal,
         });
-
         product.quantityInPieces -= item.quantity;
         await product.save({ session });
       }
 
-      const savedReturn = await new this.supplierReturnModel({
+      // ─── سجل المرتجع ───
+      const newReturn = new this.supplierReturnModel({
         returnNumber,
-        supplierId: supplier._id,
+        supplierId: dto.supplierId,
         items: processedItems,
-        totalAmount: totalReturnAmount,
         reason: dto.reason,
-        createdBy: userId ? new Types.ObjectId(userId) : null,
-      }).save({ session });
+        totalAmount: totalReturnAmount,
+        createdBy: new Types.ObjectId(userId),
+      });
+      const savedReturn = await newReturn.save({ session });
 
-      const updatedSupplier = await this.supplierModel.findByIdAndUpdate(
-        supplier._id,
-        { $inc: { balance: -totalReturnAmount } },
-        { new: true, session },
+      // ─── 🌟 ✅ التعديل الجوهري المطلوب: تحديث مديونية المورد داخل الـ Transaction 🌟 ───
+      await this.suppliersService.updateSupplierBalance(
+        dto.supplierId,
+        -totalReturnAmount, // تمرير القيمة بالسالب لخصمها من حساب المورد
+        session, // تمرير الـ session يضمن العزل المالي التام والـ ACID Compliance
       );
-
-      if (!updatedSupplier) {
-        throw new NotFoundException(`Failed to update balance for supplier.`);
-      }
 
       await session.commitTransaction();
       session.endSession();
 
+      // حركات المخزن والإشعارات (خارج الـ session كما هي)
       try {
         this.eventEmitter.emit('supplier.return.created', {
           id: savedReturn._id.toString(),
           returnNumber,
-          totalAmount: totalReturnAmount,
-          supplierName: supplier?.name || 'مورد مجهول',
-          supplierNewBalance: updatedSupplier.balance,
-          reason: dto.reason,
+          totalReturnAmount,
+          supplierName: supplier.name,
         });
       } catch (err) {
         console.error('Failed to emit supplier return event:', err);
@@ -325,8 +320,8 @@ export class ReturnsService {
             type: 'SUPPLIER_RETURN' as any,
             referenceType: 'RETURN',
             referenceId: returnNumber,
-            quantityChanged: -pItem.quantity,
-            notes: `Supplier return ${returnNumber}. Reason: ${dto.reason}`,
+            quantityChanged: pItem.quantity,
+            notes: `Supplier return ${returnNumber}.`,
           },
           userId,
         );
