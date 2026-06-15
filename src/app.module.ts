@@ -19,6 +19,7 @@ import { SearchModule } from './search/search.module';
 import { ReportsModule } from './reports/reports.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ContainersModule } from './containers/containers.module';
+import { WorkersModule } from './workers/workers.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { ContainersModule } from './containers/containers.module';
     ReportsModule,
     NotificationsModule,
     ContainersModule,
+    WorkersModule, 
   ],
   controllers: [AppController],
 })
