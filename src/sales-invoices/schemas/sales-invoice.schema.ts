@@ -1,3 +1,5 @@
+// 📄 src/sales-invoices/schemas/sales-invoice.schema.ts
+
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
@@ -33,6 +35,13 @@ class SalesItem {
 
   @Prop({ required: true, min: 0 })
   total: number;
+
+  // 🚀 الحقول الجديدة الحاسمة لمنع تصفير وتلخبطة التقارير والأرباح:
+  @Prop({ required: true, type: Number, default: 0 })
+  totalPieces: number; // 👈 هنا عشان يحفظ عدد القطع الفعلي بعد فك الكرتونة
+
+  @Prop({ required: true, type: Number, default: 0 })
+  totalCost: number; // 👈 هنا عشان يحفظ تكلفة البضاعة المباعة الحقيقية (COGS)
 }
 
 const SalesItemSchema = SchemaFactory.createForClass(SalesItem);
@@ -45,7 +54,7 @@ export class SalesInvoice {
   @Prop({ type: Types.ObjectId, ref: 'Customer', required: true, index: true })
   customerId: Types.ObjectId;
 
-  // 🛡️ التعديل الجوهري: ربط السكيما الفرعية بالمونجوز بشكل صريح لضمان الحفظ
+  // ربط السكيما الفرعية بالمونجوز بشكل صريح لضمان الحفظ
   @Prop({ type: [SalesItemSchema], required: true })
   items: SalesItem[];
 
