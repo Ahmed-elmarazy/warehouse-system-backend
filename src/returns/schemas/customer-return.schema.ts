@@ -26,6 +26,7 @@ export class CustomerReturn {
     total: number;
     purchasePrice: number;
     totalCost: number;
+    totalPieces: number; // 👈 السطر ده اللي ناقص
   }[];
 
   @Prop({ required: true })
