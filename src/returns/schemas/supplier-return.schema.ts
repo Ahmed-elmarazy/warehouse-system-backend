@@ -9,13 +9,19 @@ class SupplierReturnItem {
   productId: Types.ObjectId;
 
   @Prop({ required: true, min: 1 })
-  quantity: number;
+  quantity: number; // الكمية المدخلة (مثلاً: 2)
+
+  @Prop({ required: true, trim: true })
+  unitType: string; // الوحدة (CARTON أو PIECE)
+
+  @Prop({ required: true, min: 1 })
+  totalPieces: number; // 👈 القطع الفعلية المخزنية بعد فك الكراتين
 
   @Prop({ required: true, min: 0 })
-  price: number; // تكلفة الشراء المرتجع بها
+  price: number; // السعر للوحدة المرجعة
 
   @Prop({ required: true, min: 0 })
-  total: number;
+  total: number; // إجمالي التكلفة المستردة من المورد
 }
 const SupplierReturnItemSchema =
   SchemaFactory.createForClass(SupplierReturnItem);
@@ -23,7 +29,7 @@ const SupplierReturnItemSchema =
 @Schema({ timestamps: true })
 export class SupplierReturn {
   @Prop({ required: true, unique: true, trim: true, index: true })
-  returnNumber: string; // مثل RET-SUPP-0001
+  returnNumber: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Supplier', required: true, index: true })
   supplierId: Types.ObjectId;
@@ -32,7 +38,7 @@ export class SupplierReturn {
   items: SupplierReturnItem[];
 
   @Prop({ required: true, min: 0 })
-  totalAmount: number; // تخصم من حساب المورد المالي
+  totalAmount: number; // القيمة الإجمالية المخصومة من حساب المورد المالي
 
   @Prop({ required: true, trim: true })
   reason: string;
@@ -40,7 +46,7 @@ export class SupplierReturn {
   @Prop({ default: true, index: true })
   isActive: boolean;
 
-  @Prop({ type: Types.ObjectId, ref: 'Employee', required: true })
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true }) // تعديل ليتوافق مع الـ Auth User ID الحالي
   createdBy: Types.ObjectId;
 }
 export const SupplierReturnSchema =

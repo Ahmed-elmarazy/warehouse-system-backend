@@ -1,3 +1,5 @@
+// 📄 src/returns/returns.service.ts
+
 import {
   BadRequestException,
   ConflictException,
@@ -39,7 +41,7 @@ export class ReturnsService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  // ─── 1️⃣ مرتجع عميل (مقفل محاسبياً داخل الـ Transaction) ───────────────────
+  // ─── 1️⃣ مرتجع عميل (كرتونة / قطعة + كاش / آجل) ───────────────────
   async createCustomerReturn(
     dto: CreateCustomerReturnDto,
     userId: string,
@@ -68,7 +70,7 @@ export class ReturnsService {
           throw new NotFoundException('Linked Sales Invoice not found.');
       }
 
-      // ─── معالجة كل صنف مرتجع ───
+      // ─── معالجة كل صنف مرتجع من العميل ───
       for (const item of dto.items) {
         const product = await this.productModel
           .findOne({ _id: new Types.ObjectId(item.productId), isActive: true })
@@ -76,6 +78,13 @@ export class ReturnsService {
         if (!product)
           throw new NotFoundException(`Product ${item.productId} not found.`);
 
+        // 💡 الحسبة الذكية: تحويل الكمية المرتجعة لقطع فعلية بناءً على نوع الوحدة المرتجعة (CARTON أو PIECE)
+        const actualPiecesReturned =
+          item.unitType === 'CARTON'
+            ? item.quantity * (product.piecesPerCarton || 1)
+            : item.quantity;
+
+        // التحقق القياسي في حالة الارتجاع بناءً على فاتورة بيع معينة
         if (invoice) {
           if (!invoice.items || !Array.isArray(invoice.items)) {
             throw new BadRequestException(
@@ -91,32 +100,44 @@ export class ReturnsService {
               `Product "${product.name}" was not sold in this invoice.`,
             );
           }
-          if (item.quantity > soldItem.quantity) {
+
+          // جلب القطع الفعلية المباعة بالفاتورة لحماية المقارنة
+          const actualPiecesSold =
+            soldItem.totalPieces ??
+            (soldItem.unitType === 'CARTON'
+              ? soldItem.quantity * (product.piecesPerCarton || 1)
+              : soldItem.quantity);
+
+          if (actualPiecesReturned > actualPiecesSold) {
             throw new BadRequestException(
-              `Returned quantity for "${product.name}" (${item.quantity}) exceeds sold quantity (${soldItem.quantity}).`,
+              `Returned quantity for "${product.name}" (${item.quantity} ${item.unitType} = ${actualPiecesReturned} pcs) exceeds sold quantity (${soldItem.quantity} ${soldItem.unitType || ''} = ${actualPiecesSold} pcs).`,
             );
           }
         }
 
+        // حساب إجمالي السعر للصنف المرتجع (الكمية المدخلة كرتونة/قطعة * سعرها المرتجع)
         const itemSaleTotal = item.quantity * item.price;
+
+        // حساب التكلفة الحقيقية (COGS) المستردة للمخزن بناءً على القطع الفعلية وسعر تكلفة القطعة الواحدة
         const purchasePrice = product.purchasePrice ?? item.purchasePrice ?? 0;
-        const itemCostTotal = item.quantity * purchasePrice;
+        const itemCostTotal = actualPiecesReturned * purchasePrice;
 
         totalReturnAmount += itemSaleTotal;
         totalReturnCost += itemCostTotal;
 
         processedItems.push({
           productId: product._id,
-          quantity: item.quantity,
-          unitType: item.unitType,
+          quantity: item.quantity, // الكمية بالوحدة المختارة (مثال: 2 كرتونة)
+          unitType: item.unitType, // نوع الوحدة (CARTON أو PIECE)
           price: item.price,
           total: itemSaleTotal,
           purchasePrice,
+          totalPieces: actualPiecesReturned, // القطع التراكمية للتقارير وحركات المخازن
           totalCost: itemCostTotal,
         });
 
-        // إعادة الكمية للمخزون داخل الـ session
-        product.quantityInPieces += item.quantity;
+        // إعادة الكمية الفعلية بالقطع إلى المخزون
+        product.quantityInPieces += actualPiecesReturned;
         await product.save({ session });
       }
 
@@ -137,7 +158,7 @@ export class ReturnsService {
       });
       const savedReturn = await newReturn.save({ session });
 
-      // ─── تحديث الفاتورة المرتبطة حسب نوع المرتجع ───
+      // ─── تحديث الفاتورة المرتبطة ماليًا (إن وجدت) ───
       if (invoice && dto.invoiceId) {
         if (dto.returnType === 'CASH') {
           const updatedFinalAmount = Math.max(
@@ -187,20 +208,19 @@ export class ReturnsService {
         }
       }
 
-      // ─── ✅ التعديل الجوهري: تحديث مديونية العميل داخل الـ session لضمان الـ ACID Compliance ───
+      // ─── تحديث مديونية العميل ماليًا لو نوع المرتجع CREDIT ───
       if (dto.returnType === 'CREDIT') {
         await this.customersService.updateCustomerDebt(
           customer._id.toString(),
           -totalReturnAmount,
-          session, // تمرير الـ session يمنع الـ Race Condition تماماً
+          session, // تمرير الـ session لضمان الـ ACID Compliance
         );
       }
 
-      // تثبيت الحركات المالية والمخزنية معاً
       await session.commitTransaction();
       session.endSession();
 
-      // ─── Events (خارج الـ session) ───
+      // ─── إرسال الأحداث والـ Events (خارج نطاق الـ Transaction) ───
       try {
         this.eventEmitter.emit('customer.return.created', {
           id: savedReturn._id.toString(),
@@ -216,7 +236,7 @@ export class ReturnsService {
         console.error('Failed to emit customer return event:', err);
       }
 
-      // ─── حركات المخزن (خارج الـ session) ───
+      // ─── تسجيل حركات المخزن بالقطع الفعلية المحسوبة ───
       for (const pItem of processedItems) {
         await this.stockMovementsService.createMovement(
           {
@@ -224,8 +244,8 @@ export class ReturnsService {
             type: 'CUSTOMER_RETURN' as any,
             referenceType: 'RETURN',
             referenceId: returnNumber,
-            quantityChanged: pItem.quantity,
-            notes: `[${dto.returnType}] Customer return ${returnNumber}. Reason: ${dto.reason}`,
+            quantityChanged: pItem.totalPieces, // زيادة المخزن بالقطع الفعلية المستلمة
+            notes: `[${dto.returnType}] Customer return ${returnNumber}. (${pItem.quantity} ${pItem.unitType}). Reason: ${dto.reason}`,
           },
           userId,
         );
@@ -240,7 +260,7 @@ export class ReturnsService {
     }
   }
 
-  // ─── 2️⃣ مرتجع مورد ─────────────────────────────────────────────────────────
+  // ─── 2️⃣ مرتجع مورد (كرتونة / قطعة + حماية من المخزن السالب) ───────────────────
   async createSupplierReturn(
     dto: CreateSupplierReturnDto,
     userId: string,
@@ -257,51 +277,67 @@ export class ReturnsService {
       let totalReturnAmount = 0;
       const processedItems: any[] = [];
 
+      // ─── معالجة كل صنف مرتجع إلى المورد ───
       for (const item of dto.items) {
         const product = await this.productModel
           .findOne({ _id: new Types.ObjectId(item.productId), isActive: true })
           .session(session);
         if (!product)
           throw new NotFoundException(`Product ${item.productId} not found.`);
-        if (product.quantityInPieces < item.quantity) {
+
+        // 💡 الحسبة الذكية للمورد: تحويل الكمية المرجعة (كرتونة/قطعة) إلى قطع فعلية مخزنية
+        const actualPiecesReturned =
+          item.unitType === 'CARTON'
+            ? item.quantity * (product.piecesPerCarton || 1)
+            : item.quantity;
+
+        // قانون المخزن الصارم: منع إرجاع بضاعة للمورد بكمية أكبر من الرصيد الحالي بالقطع داخل المخزن
+        if (product.quantityInPieces < actualPiecesReturned) {
           throw new BadRequestException(
-            `Insufficient stock for "${product.name}". Available: ${product.quantityInPieces} pcs.`,
+            `Insufficient stock for "${product.name}". Available: ${product.quantityInPieces} pcs, requested return: ${actualPiecesReturned} pcs (${item.quantity} ${item.unitType}).`,
           );
         }
+
+        // حساب إجمالي التكلفة المستردة من المورد لهذا الصنف
         const itemTotal = item.quantity * item.price;
         totalReturnAmount += itemTotal;
+
         processedItems.push({
           productId: product._id,
-          quantity: item.quantity,
+          quantity: item.quantity, // الكمية المدخلة (مثال: 5 كراتين)
+          unitType: item.unitType, // الوحدة (CARTON أو PIECE)
           price: item.price,
           total: itemTotal,
+          totalPieces: actualPiecesReturned, // القطع الفعلية الخارجة من المخزن للمورد
         });
-        product.quantityInPieces -= item.quantity;
+
+        // خصم الكمية الفعلية بالقطع من رصيد المنتج بالخزنة والمخزن
+        product.quantityInPieces -= actualPiecesReturned;
         await product.save({ session });
       }
 
-      // ─── سجل المرتجع ───
+      // ─── حفظ سجل مرتجع المورد ───
       const newReturn = new this.supplierReturnModel({
         returnNumber,
-        supplierId: dto.supplierId,
+        supplierId: new Types.ObjectId(dto.supplierId),
         items: processedItems,
         reason: dto.reason,
         totalAmount: totalReturnAmount,
-        createdBy: new Types.ObjectId(userId),
+        createdBy: userId ? new Types.ObjectId(userId) : null,
       });
       const savedReturn = await newReturn.save({ session });
 
-      // ─── 🌟 ✅ التعديل الجوهري المطلوب: تحديث مديونية المورد داخل الـ Transaction 🌟 ───
+      // ─── تحديث مديونية وحساب المورد المالي بالسالب (خصم من حسابه المالي) ───
       await this.suppliersService.updateSupplierBalance(
         dto.supplierId,
-        -totalReturnAmount, // تمرير القيمة بالسالب لخصمها من حساب المورد
-        session, // تمرير الـ session يضمن العزل المالي التام والـ ACID Compliance
+        -totalReturnAmount,
+        session, // لضمان العزل المالي التام والـ ACID Compliance
       );
 
       await session.commitTransaction();
       session.endSession();
 
-      // حركات المخزن والإشعارات (خارج الـ session كما هي)
+      // ─── إرسال الأحداث الإشعارية (خارج الـ Transaction) ───
       try {
         this.eventEmitter.emit('supplier.return.created', {
           id: savedReturn._id.toString(),
@@ -313,6 +349,7 @@ export class ReturnsService {
         console.error('Failed to emit supplier return event:', err);
       }
 
+      // ─── تسجيل حركات المخزن بالسالب (خروج بضاعة للمورد) ───
       for (const pItem of processedItems) {
         await this.stockMovementsService.createMovement(
           {
@@ -320,8 +357,8 @@ export class ReturnsService {
             type: 'SUPPLIER_RETURN' as any,
             referenceType: 'RETURN',
             referenceId: returnNumber,
-            quantityChanged: pItem.quantity,
-            notes: `Supplier return ${returnNumber}.`,
+            quantityChanged: -pItem.totalPieces, // إشارة سالبة لخصمها من كارت حركة المخزن
+            notes: `Supplier return ${returnNumber}. (${pItem.quantity} ${pItem.unitType}). Reason: ${dto.reason}`,
           },
           userId,
         );
@@ -336,7 +373,7 @@ export class ReturnsService {
     }
   }
 
-  // ─── 3️⃣ دوال الجلب ──────────────────────────────────────────────────────────
+  // ─── 3️⃣ دوال الجلب والعرض (Queries) ──────────────────────────────────────────
   async getCustomerReturns(): Promise<CustomerReturn[]> {
     return this.customerReturnModel
       .find({ isActive: true })
