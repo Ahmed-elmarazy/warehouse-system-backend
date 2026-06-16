@@ -28,6 +28,7 @@ export class StockMovementsService {
   ) {}
 
   // ─── جلب كل الحركات (Pagination + Filters + Date Range) ──────────────────
+  // ─── جلب كل الحركات (Pagination + Filters + Date Range) ──────────────────
   async findAllMovements(query: StockMovementQueryDto): Promise<{
     data: any[];
     total: number;
@@ -65,7 +66,8 @@ export class StockMovementsService {
     const [data, total] = await Promise.all([
       this.stockMovementModel
         .find(filter)
-        .populate('productId', 'name code piecePrice')
+        // 🚀 التعديل المطلوب: إضافة piecesPerCarton لدعم الحسبة في الفرونت إند
+        .populate('productId', 'name code piecePrice piecesPerCarton')
         .populate('createdBy', 'name email')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -83,7 +85,6 @@ export class StockMovementsService {
       totalPages: Math.ceil(total / limit),
     };
   }
-
   // ─── جلب حركة معينة بالـ ID ──────────────────────────────────────────────
   async findMovementById(id: string): Promise<any> {
     if (!Types.ObjectId.isValid(id)) {
