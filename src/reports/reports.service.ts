@@ -1,8 +1,4 @@
-/**
- * ══════════════════════════════════════════════════════════════════════════════
- * 📐 المنطق المحاسبي المصحح والمعتمد
- * ══════════════════════════════════════════════════════════════════════════════
- */
+// 📄 src/reports/reports.service.ts
 
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -25,39 +21,33 @@ export class ReportsService {
   ) {}
 
   async getDashboardAnalytics(dto: ReportQueryDto) {
-    const { from, to } = dto; // ─── بناء فلتر التاريخ ────────────────────────────────────────────────────
+    const { from, to } = dto;
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
+    // ─── بناء فلتر التاريخ المرن ────────────────────────────────────────────────────
+    let dateRange: Record<string, any> = null;
 
-    let dateRange: Record<string, any>;
     if (from || to) {
       dateRange = {};
       if (from) dateRange.$gte = new Date(from);
       if (to) {
         const endDate = new Date(to);
-        endDate.setHours(23, 59, 59, 999);
+        endDate.setHours(23, 59, 59, 999); // تضمين نهاية اليوم المحدد بالكامل
         dateRange.$lte = endDate;
       }
-    } else {
-      dateRange = { $gte: todayStart, $lte: todayEnd };
     }
 
-    const invoiceDateFilter: Record<string, any> = {
-      isActive: true,
-      createdAt: dateRange,
-    };
+    // تجهيز فلاتر الـ Match بناءً على وجود التاريخ من عدمه
+    const invoiceDateFilter: Record<string, any> = { isActive: true };
+    const returnDateFilter: Record<string, any> = { isActive: true };
+    const stockDateFilter: Record<string, any> = {};
 
-    const returnDateFilter: Record<string, any> = {
-      isActive: true,
-      createdAt: dateRange,
-    };
+    if (dateRange) {
+      invoiceDateFilter.createdAt = dateRange;
+      returnDateFilter.createdAt = dateRange;
+      stockDateFilter.createdAt = dateRange;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
-    const stockDateFilter: Record<string, any> = {
-      createdAt: dateRange,
-    }; // ─────────────────────────────────────────────────────────────────────────
     const [
       salesReport,
       profitReport,
@@ -83,10 +73,10 @@ export class ReportsService {
           },
         },
         { $project: { _id: 0 } },
-      ]), // ════════════════════════════════════════════════════════════════════════
+      ]),
+
       // 💰 2. PROFIT ANALYSIS REPORT
       // ════════════════════════════════════════════════════════════════════════
-
       this.salesInvoiceModel.aggregate([
         { $match: invoiceDateFilter },
         {
@@ -122,7 +112,7 @@ export class ReportsService {
               $multiply: [
                 {
                   $multiply: [
-                    { $ifNull: ['$items.totalPieces', '$items.quantity'] },
+                    { $ifNull: ['$items.totalPieces', '$items.quantity'] }, // 👈 يقرأ الـ totalPieces المحسوبة بالكرتونة والقطع بدقة متناهية
                     { $ifNull: ['$productInfo.purchasePrice', 0] },
                   ],
                 },
@@ -164,10 +154,10 @@ export class ReportsService {
             },
           },
         },
-      ]), // ════════════════════════════════════════════════════════════════════════
+      ]),
+
       // 🔄 3. RETURNS REPORT
       // ════════════════════════════════════════════════════════════════════════
-
       this.customerReturnModel.aggregate([
         { $match: returnDateFilter },
         { $unwind: '$items' },
@@ -247,10 +237,10 @@ export class ReportsService {
           },
         },
         { $project: { _id: 0 } },
-      ]), // ════════════════════════════════════════════════════════════════════════
+      ]),
+
       // 📦 4. INVENTORY REPORT
       // ════════════════════════════════════════════════════════════════════════
-
       this.productModel.aggregate([
         { $match: { isActive: true } },
         {
@@ -286,10 +276,10 @@ export class ReportsService {
           },
         },
         { $project: { _id: 0 } },
-      ]), // ════════════════════════════════════════════════════════════════════════
-      // 👤 5. CUSTOMER DEBT REPORT (تم تعديله ليقرأ الديون الصافية والمحدثة)
-      // ════════════════════════════════════════════════════════════════════════
+      ]),
 
+      // 👤 5. CUSTOMER DEBT REPORT
+      // ════════════════════════════════════════════════════════════════════════
       this.customerModel.aggregate([
         { $match: { isActive: true, currentDebt: { $gt: 0 } } },
         {
@@ -327,10 +317,10 @@ export class ReportsService {
             top10CustomersByDebt: '$topDebtors',
           },
         },
-      ]), // ════════════════════════════════════════════════════════════════════════
+      ]),
+
       // 🚚 6. SUPPLIER SUMMARY REPORT
       // ════════════════════════════════════════════════════════════════════════
-
       this.supplierModel.aggregate([
         { $match: { isActive: true } },
         {
@@ -341,10 +331,10 @@ export class ReportsService {
           },
         },
         { $project: { _id: 0 } },
-      ]), // ════════════════════════════════════════════════════════════════════════
+      ]),
+
       // 📊 7. STOCK MOVEMENT ANALYTICS
       // ════════════════════════════════════════════════════════════════════════
-
       this.stockMovementModel.aggregate([
         { $match: stockDateFilter },
         {
@@ -378,10 +368,9 @@ export class ReportsService {
           },
         },
       ]),
-    ]); // ══════════════════════════════════════════════════════════════════════════
-    // 🧮 الحسابات النهائية المصححة والمقفلّة بالمليم
-    // ══════════════════════════════════════════════════════════════════════════
+    ]);
 
+    // 🧮 الحسابات النهائية التراكمية المستقرة
     const sales = salesReport[0] || {
       totalInvoicesValue: 0,
       totalCollected: 0,
@@ -397,7 +386,7 @@ export class ReportsService {
       productsProfitBreakdown: [],
     };
 
-    const returns = returnsReport[0] || {
+    const errorsHandledReturns = returnsReport[0] || {
       cashReturnAmount: 0,
       cashReturnCost: 0,
       cashReturnedProfit: 0,
@@ -406,24 +395,20 @@ export class ReportsService {
       creditReturnedProfit: 0,
       totalReturnedAmount: 0,
       totalReturnedProfit: 0,
-    }; // 1. صافي قيمة المبيعات (إجمالي الفواتير - كل المرتجعات)
-    // 1. صافي قيمة المبيعات (إجمالي الفواتير - كل المرتجعات)
+    };
 
     const netSalesValue =
-      sales.totalInvoicesValue - returns.totalReturnedAmount; // 2. الكاش الفعلي المحصل في الخزنة (المدفوع فواتير - مرتجعات الكاش)
-
-    const netCollected = sales.totalCollected - returns.cashReturnAmount; // 3. المديونية المتبقية الفورية (المتبقي من الفواتير - مرتجعات الآجل)
-
-    const netRemaining = sales.totalRemaining - returns.creditReturnAmount; // 4. ✅ التعديل الصح لصافي الربح:
-    // استخدام القيم الفعلية المحسوبة من الداتا بيز بدلاً من النسبة التقريبية
-
+      sales.totalInvoicesValue - errorsHandledReturns.totalReturnedAmount;
+    const netCollected =
+      sales.totalCollected - errorsHandledReturns.cashReturnAmount;
+    const netRemaining =
+      sales.totalRemaining - errorsHandledReturns.creditReturnAmount;
     const netProfit = Math.max(
       0,
-      profitRaw.totalCollectedProfit - returns.cashReturnedProfit,
-    ); // 5. نسبة هامش الربح الحقيقية بناءً على الأرباح الصافية
-
+      profitRaw.totalCollectedProfit - errorsHandledReturns.cashReturnedProfit,
+    );
     const profitMarginPercentage =
-      netCollected > 0 ? (netProfit / netCollected) * 100 : 0; // 6. ✅ تفاصيل المنتجات: عرض الأرقام الفعلية دون توزيع نسبة المرتجع على منتجات ملهاش علاقة
+      netCollected > 0 ? (netProfit / netCollected) * 100 : 0;
 
     const finalProductsBreakdown = profitRaw.productsProfitBreakdown.map(
       (p: any) => ({
@@ -441,9 +426,12 @@ export class ReportsService {
         averageInvoiceValue: Math.round(sales.averageInvoiceValue * 100) / 100,
         totalInvoicesValue: Math.round(sales.totalInvoicesValue * 100) / 100,
         totalReturns: {
-          total: Math.round(returns.totalReturnedAmount * 100) / 100,
-          cashReturns: Math.round(returns.cashReturnAmount * 100) / 100,
-          creditReturns: Math.round(returns.creditReturnAmount * 100) / 100,
+          total:
+            Math.round(errorsHandledReturns.totalReturnedAmount * 100) / 100,
+          cashReturns:
+            Math.round(errorsHandledReturns.cashReturnAmount * 100) / 100,
+          creditReturns:
+            Math.round(errorsHandledReturns.creditReturnAmount * 100) / 100,
         },
         netSalesValue: Math.round(netSalesValue * 100) / 100,
         totalCollected: Math.max(0, Math.round(netCollected * 100) / 100),
@@ -453,10 +441,12 @@ export class ReportsService {
         grossCollectedProfit:
           Math.round(profitRaw.totalCollectedProfit * 100) / 100,
         lostProfitFromReturns: {
-          total: Math.round(returns.totalReturnedProfit * 100) / 100,
-          fromCashReturns: Math.round(returns.cashReturnedProfit * 100) / 100,
+          total:
+            Math.round(errorsHandledReturns.totalReturnedProfit * 100) / 100,
+          fromCashReturns:
+            Math.round(errorsHandledReturns.cashReturnedProfit * 100) / 100,
           fromCreditReturns:
-            Math.round(returns.creditReturnedProfit * 100) / 100,
+            Math.round(errorsHandledReturns.creditReturnedProfit * 100) / 100,
         },
         totalProfit: Math.max(0, Math.round(netProfit * 100) / 100),
         profitMarginPercentage: Math.round(profitMarginPercentage * 100) / 100,

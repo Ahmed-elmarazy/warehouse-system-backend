@@ -66,14 +66,20 @@ export class SalesInvoicesService {
         );
       }
 
-      // 🚨 قانون المخزن الصارم: منع المخزن السالب نهائياً!
-      if (product.quantityInPieces < item.quantity) {
+      // 💡 الحسبة الذكية: تحويل الكمية لقطع فعلية لو مبيوعة بالكرتونة
+      const actualPieces =
+        item.unitType === 'CARTON'
+          ? item.quantity * (product.piecesPerCarton || 1)
+          : item.quantity;
+
+      // 🚨 قانون المخزن الصارم: منع المخزن السالب بناءً على القطع الفعلية!
+      if (product.quantityInPieces < actualPieces) {
         throw new BadRequestException(
-          `Inadequate stock for "${product.name}"! Available: ${product.quantityInPieces} pcs, requested: ${item.quantity} pcs.`,
+          `Inadequate stock for "${product.name}"! Available: ${product.quantityInPieces} pcs, requested: ${actualPieces} pcs (${item.quantity} ${item.unitType}).`,
         );
       }
 
-      // حساب إجمالي السطر (الكمية * السعر) - خصم الصنف
+      // حساب إجمالي السطر (الكمية * السعر) - خصم الصنف (الكمية هنا تفضل زي ما هي عشان السعر بيبقى جاي للوحدة المبعوثة)
       const itemTotal = item.quantity * item.price - item.discount;
       if (itemTotal < 0) {
         throw new BadRequestException(
@@ -83,13 +89,24 @@ export class SalesInvoicesService {
 
       calculatedTotalAmount += itemTotal;
 
+      // حساب التكلفة الحقيقية للصنف الفردي (COGS) بناءً على سعر الشراء التخزيني للقطع
+      const pieceCost = product.purchasePrice || 0;
+      const actualItemCost = actualPieces * pieceCost;
+
+      // خصم رصيد المنتج الفعلي في الداتابيز بالقطع
+      product.quantityInPieces -= actualPieces;
+      await product.save();
+
+      // حفظ الداتا للطباعة مع حقن الـ الكواليس (totalPieces & totalCost)
       processedItems.push({
         productId: product._id,
-        quantity: item.quantity,
-        unitType: item.unitType,
+        quantity: item.quantity, // بتفضل 1 كرتونة زي ما هي للطباعة والفرونت
+        unitType: item.unitType, // بتفضل CARTON للطباعة والفرونت
         price: item.price,
         discount: item.discount,
         total: itemTotal,
+        totalPieces: actualPieces, // 👈 تتحقن وتتحفظ جوه السجل للتقارير والأرباح
+        totalCost: actualItemCost, // 👈 تتحقن وتتحفظ عشان حساب الـ COGS
       });
     }
 
@@ -151,7 +168,7 @@ export class SalesInvoicesService {
       console.error('Failed to emit sales invoice notification event:', error);
     }
 
-    // 6. استدعاء محرك المخزن آلياً لخصم البضاعة بالقطع بالسالب
+    // 6. استدعاء محرك المخزن آلياً لخصم البضاعة بالقطع الفعلية (actualPieces)
     for (const pItem of processedItems) {
       await this.stockMovementsService.createMovement(
         {
@@ -159,8 +176,8 @@ export class SalesInvoicesService {
           type: 'SALE',
           referenceType: 'SALES_INVOICE',
           referenceId: invoiceNumber,
-          quantityChanged: -pItem.quantity,
-          notes: `Automated stock deduction for invoice ${invoiceNumber}`,
+          quantityChanged: -pItem.totalPieces, // 👈 التعديل هنا: الخصم بالقطع الفعلية التراكمية في كرت الهوية للمخزن
+          notes: `Automated stock deduction for invoice ${invoiceNumber} (${pItem.quantity} ${pItem.unitType})`,
         },
         userId,
       );
@@ -217,8 +234,8 @@ export class SalesInvoicesService {
         .populate('customerId', 'name customerCode phone')
         .populate({
           path: 'items.productId',
-          select: 'name code price piecesPerCarton', // الحقول اللي محتاجها تظهر للـ Frontend
-          options: { strictPopulate: false }, // 👈 الحماية الإضافية لمنع الـ 500 Error
+          select: 'name code price piecesPerCarton purchasePrice', // 💡 أضفنا الـ purchasePrice للاحتياط
+          options: { strictPopulate: false },
         })
         .populate('createdBy', 'name email')
         .sort({ createdAt: -1 })
@@ -247,7 +264,7 @@ export class SalesInvoicesService {
     const invoice = await this.salesInvoiceModel
       .findOne({ _id: new Types.ObjectId(id), isActive: true })
       .populate('customerId', 'name customerCode phone address')
-      .populate('items.productId', 'name code piecesPerCarton')
+      .populate('items.productId', 'name code piecesPerCarton purchasePrice')
       .populate('createdBy', 'name email')
       .lean()
       .exec();
