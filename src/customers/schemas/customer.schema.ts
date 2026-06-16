@@ -1,3 +1,5 @@
+// 📄 src/customers/schemas/customer.schema.ts
+
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
@@ -21,7 +23,10 @@ export class Customer {
   address?: string;
 
   @Prop({ required: true, default: 0 })
-  currentDebt: number; // يمثل إجمالي الديون المستحقة على العميل للشركة
+  openingBalance: number; // 👈 الرصيد الافتتاحي المستحق عند التأسيس
+
+  @Prop({ required: true, default: 0 })
+  currentDebt: number; // يمثل الديون المستحقة من واقع الفواتير والسندات فقط
 
   @Prop({ default: true, index: true })
   isActive: boolean;
@@ -31,6 +36,4 @@ export class Customer {
 }
 
 export const CustomerSchema = SchemaFactory.createForClass(Customer);
-
-// عمل إندكس مركب وتكست للبحث الشامل والسريع بالاسم أو الكود أو الهاتف
 CustomerSchema.index({ name: 'text', customerCode: 'text', phone: 'text' });

@@ -1,3 +1,5 @@
+// 📄 src/suppliers/schemas/supplier.schema.ts
+
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
@@ -21,7 +23,10 @@ export class Supplier {
   address?: string;
 
   @Prop({ required: true, default: 0 })
-  balance: number; // يمثل المبالغ المستحقة للمورد (المديونية)
+  openingBalance: number; // 👈 مستحقات المورد السابقة قبل البدء بالنظام
+
+  @Prop({ required: true, default: 0 })
+  balance: number; // يمثل المبالغ المستحقة اللاحقة من الفواتير والسندات
 
   @Prop({ default: true, index: true })
   isActive: boolean;
@@ -31,6 +36,4 @@ export class Supplier {
 }
 
 export const SupplierSchema = SchemaFactory.createForClass(Supplier);
-
-// عمل Text Index للبحث السريع بالاسم أو الكود أو الهاتف
 SupplierSchema.index({ name: 'text', supplierCode: 'text', phone: 'text' });

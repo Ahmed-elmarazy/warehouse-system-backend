@@ -1,3 +1,5 @@
+// 📄 src/customers/customers.service.ts
+
 import {
   BadRequestException,
   ConflictException,
@@ -18,7 +20,6 @@ export class CustomersService {
     private readonly customerModel: Model<CustomerDocument>,
   ) {}
 
-  // ─── إنشاء عميل جديد وتوليد الكود تلقائياً ──────────────────────────────
   async create(dto: CreateCustomerDto): Promise<CustomerDocument> {
     const existingPhone = await this.customerModel
       .findOne({ phone: dto.phone, isActive: true })
@@ -30,7 +31,6 @@ export class CustomersService {
       );
     }
 
-    // توليد كود فريد شبه تسلسلي يمنع التكرار نهائياً في قواعد البيانات الضخمة
     const timestamp = Date.now().toString().slice(-4);
     const randomDigits = Math.floor(1000 + Math.random() * 9000);
     const customerCode = `CUST-${timestamp}-${randomDigits}-${new Date().getFullYear()}`;
@@ -38,13 +38,13 @@ export class CustomersService {
     const customer = new this.customerModel({
       ...dto,
       customerCode,
-      currentDebt: 0, // يبدأ الحساب دائماً بصفر
+      openingBalance: dto.openingBalance ?? 0, // 👈 حفظ الرصيد الافتتاحي
+      currentDebt: 0,
     });
 
     return await customer.save();
   }
 
-  // ─── جلب كل العملاء (Pagination + Filtered Search) ───────────────────
   async findAll(query: CustomerQueryDto): Promise<{
     data: any[];
     total: number;
@@ -66,7 +66,7 @@ export class CustomersService {
       ];
     }
 
-    const [data, total] = await Promise.all([
+    const [rawCustomers, total] = await Promise.all([
       this.customerModel
         .find(filter)
         .sort({ createdAt: -1 })
@@ -77,31 +77,29 @@ export class CustomersService {
       this.customerModel.countDocuments(filter).exec(),
     ]);
 
-    return {
-      data,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    };
+    // دمج الحسبة تلقائياً لكل عميل في قائمة العرض للفرونت إند للشفافية
+    const data = rawCustomers.map((cust) => ({
+      ...cust,
+      totalOutstandingDebt:
+        Math.round(
+          ((cust.openingBalance || 0) + (cust.currentDebt || 0)) * 100,
+        ) / 100,
+    }));
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
-  // ─── جلب عميل معين بالـ ID ─────────────────────────────────────────────
   async findById(id: string): Promise<CustomerDocument> {
-    if (!Types.ObjectId.isValid(id)) {
+    if (!Types.ObjectId.isValid(id))
       throw new BadRequestException('Invalid Customer ID format');
-    }
-
     const customer = await this.customerModel
       .findOne({ _id: new Types.ObjectId(id), isActive: true })
       .exec();
-    if (!customer) {
+    if (!customer)
       throw new NotFoundException(`Customer with ID "${id}" not found`);
-    }
     return customer;
   }
 
-  // ─── تعديل بيانات عميل (Owner Only) ────────────────────────────────────
   async update(id: string, dto: UpdateCustomerDto): Promise<CustomerDocument> {
     const customer = await this.findById(id);
 
@@ -121,10 +119,8 @@ export class CustomersService {
       .exec();
   }
 
-  // ─── حذف عميل (Soft Delete) ───────────────────────────────────────────
   async remove(id: string): Promise<{ message: string }> {
     const customer = await this.findById(id);
-
     await this.customerModel
       .findByIdAndUpdate(customer._id, { $set: { isActive: false } })
       .exec();
@@ -133,55 +129,37 @@ export class CustomersService {
     };
   }
 
-  // ─── المحرك المالي الداخلي: تحديث مديونية العميل مع دعم الـ Transactions ───
   async updateCustomerDebt(
     customerId: string,
     amount: number,
     session?: any,
   ): Promise<void> {
-    if (!Types.ObjectId.isValid(customerId)) {
+    if (!Types.ObjectId.isValid(customerId))
       throw new BadRequestException('Invalid Customer ID for debt operation');
-    }
-
-    // تقريب مالي لمنع مشاكل الكسور العشرية العشوائية في Javascript
     const safeAmount = Math.round(amount * 100) / 100;
 
     const result = await this.customerModel
       .findByIdAndUpdate(
         new Types.ObjectId(customerId),
         { $inc: { currentDebt: safeAmount } },
-        { new: true, session }, // ربط كامل مع الـ Transaction لضمان سلامة البيانات (ACID)
+        { new: true, session },
       )
       .exec();
 
-    if (!result) {
+    if (!result)
       throw new NotFoundException(
         `Customer with ID "${customerId}" not found for debt execution`,
       );
-    }
   }
 
-  // ─── كشف الحساب المالي التفصيلي الديناميكي (شامل الفواتير، السندات، والمرتجع الآجل) ───
+  // ─── كشف الحساب المالي المطور بدمج الرصيد الافتتاحي ───
   async getCustomerStatement(id: string): Promise<any> {
-    if (!Types.ObjectId.isValid(id)) {
-      throw new BadRequestException('Invalid Customer ID format');
-    }
+    const customer = await this.findById(id);
 
-    // 1. جلب بيانات العميل الأساسية
-    const customer = await this.customerModel
-      .findOne({ _id: new Types.ObjectId(id), isActive: true })
-      .lean()
-      .exec();
-    if (!customer) {
-      throw new NotFoundException(`Customer with ID "${id}" not found`);
-    }
-
-    // حقن الموديلات الـ 3 ديناميكياً
     const salesInvoiceModel = this.customerModel.db.model('SalesInvoice');
     const paymentModel = this.customerModel.db.model('Payment');
     const customerReturnModel = this.customerModel.db.model('CustomerReturn');
 
-    // 2. جلب متوازي متكامل (الفواتير، السندات، والمرتجع الحقيقي للعميل)
     const [invoices, payments, returns] = await Promise.all([
       salesInvoiceModel
         .find({ customerId: customer._id, isActive: true })
@@ -197,7 +175,6 @@ export class CustomersService {
         .exec(),
     ]);
 
-    // 3. العمليات الحسابية المتطورة والدقيقة من واقع الداتابيز
     const totalSalesAmount = invoices.reduce(
       (sum: number, inv: any) => sum + (inv.finalAmount || 0),
       0,
@@ -211,14 +188,26 @@ export class CustomersService {
       0,
     );
 
-    // حساب إجمالي المرتجعات الآجلة (CREDIT) التي تؤثر على توازن الدين المتبقي
     const totalCreditReturns = returns
       .filter((ret: any) => ret.returnType === 'CREDIT')
       .reduce((sum: number, ret: any) => sum + (ret.totalAmount || 0), 0);
 
-    // المديونية الفعلية = (متبقي الفواتير الآجلة) - (إجمالي المرتجعات الآجلة للعميل)
-    const rawOutstandingDebt = totalInvoiceRemaining - totalCreditReturns;
+    // 🛡️ صمام الأمان: المديونية تشمل الـ Opening Balance ولكن الـ totalPurchasedAmount (المبيعات للداش بورد) تظل نظيفة تماماً!
+    const openingBalance = customer.openingBalance || 0;
+    const rawOutstandingDebt =
+      openingBalance + totalInvoiceRemaining - totalCreditReturns;
     const currentOutstandingDebt = Math.round(rawOutstandingDebt * 100) / 100;
+
+    // تجهيز كشف الحركات التجميعي التاريخي وتضمين الرصيد الافتتاحي كأول حركة دايماً
+    const timeline: any[] = [
+      {
+        type: 'OPENING_BALANCE',
+        referenceId: 'START-BAL',
+        amount: openingBalance,
+        date: (customer as any).createdAt,
+        notes: 'الرصيد المالي الافتتاحي للمديونية السابقة',
+      },
+    ];
 
     return {
       customerInfo: {
@@ -226,23 +215,26 @@ export class CustomersService {
         name: customer.name,
         customerCode: customer.customerCode,
         phone: customer.phone,
+        openingBalance,
         actualSavedDebt: customer.currentDebt,
+        totalRequiredDebt: openingBalance + customer.currentDebt, // إجمالي المطلوب النهائي من العميل
       },
       financialSummary: {
-        totalPurchasedAmount: Math.round(totalSalesAmount * 100) / 100,
+        totalPurchasedAmount: Math.round(totalSalesAmount * 100) / 100, // المبيعات صافية 100% للداش بورد
         totalPaidAmount: Math.round(totalPaidFromInvoices * 100) / 100,
         totalCreditReturnsAmount: Math.round(totalCreditReturns * 100) / 100,
-        currentOutstandingDebt: Math.max(0, currentOutstandingDebt), // حماية من القيم السالبة العشوائية
+        currentOutstandingDebt: Math.max(0, currentOutstandingDebt),
         totalPaymentReceiptsCount: payments.length,
       },
       history: {
+        statementTimeline: timeline, // يمكن دمج باقي الفواتير والسندات في الفرونت إند هنا
         invoices: invoices.map((inv: any) => ({
           invoiceNumber: inv.invoiceNumber,
           finalAmount: inv.finalAmount,
           paidAmount: inv.paidAmount,
           remainingAmount: inv.remainingAmount,
           paymentType: inv.paymentType,
-          date: inv.createdAt,
+          date: inv.date,
         })),
         payments: payments.map((pay: any) => ({
           paymentNumber: pay.paymentNumber,
@@ -256,7 +248,7 @@ export class CustomersService {
           returnType: ret.returnType,
           reason: ret.reason,
           date: ret.createdAt,
-        })), // <== مصفوفة المرتجعات تمت إضافتها هنا بنجاح بناءً على طلبك
+        })),
       },
     };
   }

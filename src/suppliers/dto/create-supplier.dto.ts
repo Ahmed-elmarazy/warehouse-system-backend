@@ -1,9 +1,13 @@
+// 📄 src/suppliers/dto/create-supplier.dto.ts
+
 import {
   IsEmail,
   IsNotEmpty,
   IsOptional,
   IsString,
   MaxLength,
+  IsNumber,
+  Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
@@ -35,6 +39,16 @@ export class CreateSupplierDto {
   @IsString()
   @Transform(({ value }) => value?.trim())
   address?: string;
+
+  @ApiPropertyOptional({
+    example: 4000,
+    description: 'المبالغ المستحقة للمورد كأرصدة افتتاحية أول المدة',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Transform(({ value }) => (value !== undefined ? Number(value) : 0))
+  openingBalance?: number; // 👈 الحقل الجديد للموردين
 
   @ApiPropertyOptional({ example: 'مورد رئيسي لمنتجات المشروبات الغازية' })
   @IsOptional()
