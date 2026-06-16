@@ -25,7 +25,6 @@ export class ProductsService {
   ) {}
 
   // ─── Create ───────────────────────────────────────────────────────────────
-
   async createProduct(
     dto: CreateProductDto,
     ownerId: string,
@@ -53,7 +52,7 @@ export class ProductsService {
       cartonPrice: dto.cartonPrice,
       piecePrice: dto.piecePrice,
       piecesPerCarton: dto.piecesPerCarton,
-      quantityInPieces: dto.quantityInPieces ?? 0,
+      quantityInPieces: dto.quantityInPieces ?? 0, // الرصيد الابتدائي عند التأسيس فقط
       minimumQuantity: dto.minimumQuantity,
       maximumQuantity: dto.maximumQuantity,
       notes: dto.notes ?? null,
@@ -65,7 +64,6 @@ export class ProductsService {
   }
 
   // ─── Find All ─────────────────────────────────────────────────────────────
-
   async findAllProducts(query: ProductQueryDto): Promise<{
     data: any[];
     total: number;
@@ -112,10 +110,11 @@ export class ProductsService {
   }
 
   // ─── Find One ─────────────────────────────────────────────────────────────
-
-  async findProductById(id: string): Promise<ProductDocument> {
+  // 💡 دعم الـ session اختياريًا لضمان قراءة أدق الكميات أثناء جرد الفواتير
+  async findProductById(id: string, session?: any): Promise<ProductDocument> {
     const product = await this.productModel
       .findOne({ _id: this.toObjectId(id, 'id'), isActive: true })
+      .session(session) // 👈 ربط السيسشن إن وجدت
       .populate('categoryId', 'name _id')
       .populate('createdBy', 'name email _id')
       .populate('updatedBy', 'name email _id')
@@ -129,29 +128,26 @@ export class ProductsService {
   }
 
   // ─── Update ───────────────────────────────────────────────────────────────
-
   async updateProduct(
     id: string,
     dto: UpdateProductDto,
     ownerId: string,
+    session?: any, // 👈 تمرير الـ session لحماية التحديث المتزامن
   ): Promise<ProductDocument> {
-    const existing = await this.productModel.findOne({
-      _id: this.toObjectId(id, 'id'),
-      isActive: true,
-    });
+    const existing = await this.productModel
+      .findOne({ _id: this.toObjectId(id, 'id'), isActive: true })
+      .session(session);
 
     if (!existing) {
       throw new NotFoundException(`Product with id "${id}" not found`);
     }
 
-    // Resolve final category for validation
     const finalCategoryId = dto.categoryId
       ? this.toObjectId(dto.categoryId, 'categoryId')
       : existing.categoryId;
 
-    // Code uniqueness — only check if code is actually changing
     if (dto.code && dto.code !== existing.code) {
-      await this.ensureUniqueCode(dto.code, id);
+      await this.ensureUniqueCode(dto.code, id, session);
     }
 
     const newMin = dto.minimumQuantity ?? existing.minimumQuantity;
@@ -166,6 +162,7 @@ export class ProductsService {
       updatedBy: new Types.ObjectId(ownerId),
     };
 
+    // 🛡️ حماية صارمة: منع الـ Payload من استقبال أو تعديل الرصيد يدوياً
     const directFields = [
       'name',
       'code',
@@ -186,7 +183,11 @@ export class ProductsService {
     if (dto.categoryId) payload.categoryId = finalCategoryId;
 
     const updated = await this.productModel
-      .findByIdAndUpdate(existing._id, { $set: payload }, { new: true })
+      .findByIdAndUpdate(
+        existing._id,
+        { $set: payload },
+        { new: true, session }, // 👈 تمرير الـ session هنا
+      )
       .populate('categoryId', 'name _id')
       .exec();
 
@@ -194,32 +195,34 @@ export class ProductsService {
   }
 
   // ─── Soft Delete ──────────────────────────────────────────────────────────
-
   async deleteProduct(
     id: string,
     ownerId: string,
+    session?: any,
   ): Promise<{ message: string }> {
-    const existing = await this.productModel.findOne({
-      _id: this.toObjectId(id, 'id'),
-      isActive: true,
-    });
+    const existing = await this.productModel
+      .findOne({ _id: this.toObjectId(id, 'id'), isActive: true })
+      .session(session);
 
     if (!existing) {
       throw new NotFoundException(`Product with id "${id}" not found`);
     }
 
-    await this.productModel.findByIdAndUpdate(existing._id, {
-      $set: {
-        isActive: false,
-        updatedBy: new Types.ObjectId(ownerId),
+    await this.productModel.findByIdAndUpdate(
+      existing._id,
+      {
+        $set: {
+          isActive: false,
+          updatedBy: new Types.ObjectId(ownerId),
+        },
       },
-    });
+      { session }, // 👈 تمرير الـ session
+    );
 
     return { message: `Product "${existing.name}" has been deleted` };
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
-
   private toObjectId(value: string, field: string): Types.ObjectId {
     if (!Types.ObjectId.isValid(value)) {
       throw new BadRequestException(`"${field}" is not a valid ObjectId`);
@@ -229,9 +232,11 @@ export class ProductsService {
 
   private async ensureCategoryExists(
     categoryId: Types.ObjectId,
+    session?: any,
   ): Promise<void> {
     const exists = await this.categoryModel
       .findOne({ _id: categoryId, isActive: true })
+      .session(session)
       .lean()
       .exec();
 
@@ -245,6 +250,7 @@ export class ProductsService {
   private async ensureUniqueCode(
     code: string,
     excludeId?: string,
+    session?: any,
   ): Promise<void> {
     const filter: Record<string, any> = {
       code: { $regex: `^${this.escapeRegex(code)}$`, $options: 'i' },
@@ -253,7 +259,11 @@ export class ProductsService {
 
     if (excludeId) filter._id = { $ne: new Types.ObjectId(excludeId) };
 
-    const duplicate = await this.productModel.findOne(filter).lean().exec();
+    const duplicate = await this.productModel
+      .findOne(filter)
+      .session(session)
+      .lean()
+      .exec();
 
     if (duplicate) {
       throw new ConflictException(

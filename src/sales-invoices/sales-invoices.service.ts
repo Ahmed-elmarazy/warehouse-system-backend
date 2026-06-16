@@ -17,6 +17,8 @@ import { SalesInvoiceQueryDto } from './dto/sales-invoice-query.dto';
 import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { CustomersService } from '../customers/customers.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { InjectConnection } from '@nestjs/mongoose'; // 👈 استيراد الـ InjectConnection
+import { Connection } from 'mongoose'; // 👈 استيراد Connection من mongoose
 
 @Injectable()
 export class SalesInvoicesService {
@@ -28,11 +30,11 @@ export class SalesInvoicesService {
     @InjectModel('Product')
     private readonly productModel: Model<any>,
 
+    @InjectConnection() private readonly connection: Connection, // 👈 حقن الـ Mongoose Connection هنا
     private readonly stockMovementsService: StockMovementsService,
     private readonly customersService: CustomersService,
   ) {}
 
-  // ─── إنشاء الفاتورة، خصم المخزن، وتحديث الديون ───────────────────────────
   async createInvoice(
     dto: CreateSalesInvoiceDto,
     userId: string,
@@ -43,157 +45,182 @@ export class SalesInvoicesService {
       );
     }
 
-    // 1. التأكد من وجود العميل أولاً وصلاحيته
-    const customer = await this.customersService.findById(dto.customerId);
+    // 🚀 بدء السيسشن والـ Transaction الفعلي للمونجو دي بي
+    const session = await this.connection.startSession();
+    session.startTransaction();
 
-    const invoiceNumber = `INV-SALES-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    let calculatedTotalAmount = 0;
-    const processedItems = [];
-
-    // 2. فحص البضاعة والمخازن والأسعار بدقة
-    for (const item of dto.items) {
-      if (!Types.ObjectId.isValid(item.productId)) {
-        throw new BadRequestException(`Invalid Product ID: ${item.productId}`);
-      }
-
-      const product = await this.productModel.findOne({
-        _id: new Types.ObjectId(item.productId),
-        isActive: true,
-      });
-      if (!product) {
-        throw new NotFoundException(
-          `Product with ID "${item.productId}" not found.`,
-        );
-      }
-
-      // 💡 الحسبة الذكية: تحويل الكمية لقطع فعلية لو مبيوعة بالكرتونة
-      const actualPieces =
-        item.unitType === 'CARTON'
-          ? item.quantity * (product.piecesPerCarton || 1)
-          : item.quantity;
-
-      // 🚨 قانون المخزن الصارم: منع المخزن السالب بناءً على القطع الفعلية!
-      if (product.quantityInPieces < actualPieces) {
-        throw new BadRequestException(
-          `Inadequate stock for "${product.name}"! Available: ${product.quantityInPieces} pcs, requested: ${actualPieces} pcs (${item.quantity} ${item.unitType}).`,
-        );
-      }
-
-      // حساب إجمالي السطر (الكمية * السعر) - خصم الصنف (الكمية هنا تفضل زي ما هي عشان السعر بيبقى جاي للوحدة المبعوثة)
-      const itemTotal = item.quantity * item.price - item.discount;
-      if (itemTotal < 0) {
-        throw new BadRequestException(
-          `Discount for product "${product.name}" cannot exceed its total price.`,
-        );
-      }
-
-      calculatedTotalAmount += itemTotal;
-
-      // حساب التكلفة الحقيقية للصنف الفردي (COGS) بناءً على سعر الشراء التخزيني للقطع
-      const pieceCost = product.purchasePrice || 0;
-      const actualItemCost = actualPieces * pieceCost;
-
-      // خصم رصيد المنتج الفعلي في الداتابيز بالقطع
-      product.quantityInPieces -= actualPieces;
-      await product.save();
-
-      // حفظ الداتا للطباعة مع حقن الـ الكواليس (totalPieces & totalCost)
-      processedItems.push({
-        productId: product._id,
-        quantity: item.quantity, // بتفضل 1 كرتونة زي ما هي للطباعة والفرونت
-        unitType: item.unitType, // بتفضل CARTON للطباعة والفرونت
-        price: item.price,
-        discount: item.discount,
-        total: itemTotal,
-        totalPieces: actualPieces, // 👈 تتحقن وتتحفظ جوه السجل للتقارير والأرباح
-        totalCost: actualItemCost, // 👈 تتحقن وتتحفظ عشان حساب الـ COGS
-      });
-    }
-
-    // 3. تطبيق الحسابات والخصم الكلي للفاتورة
-    const finalAmount = calculatedTotalAmount - dto.discount;
-    if (finalAmount < 0) {
-      throw new BadRequestException(
-        'Main invoice discount cannot exceed the final total amount.',
-      );
-    }
-
-    // 4. ضبط حسابات الدفع والمديونية بناءً على نوع العملية بالملي
-    let paidAmount = dto.paidAmount;
-    let remainingAmount = 0;
-
-    if (dto.paymentType === PaymentType.CASH) {
-      paidAmount = finalAmount; // الكاش بيقفل الحساب بالكامل فوراً
-      remainingAmount = 0;
-    } else if (dto.paymentType === PaymentType.CREDIT) {
-      paidAmount = 0; // الآجل بالكامل مدفوعه صفر
-      remainingAmount = finalAmount;
-    } else if (dto.paymentType === PaymentType.PARTIAL) {
-      if (paidAmount >= finalAmount) {
-        throw new BadRequestException(
-          'Paid amount for partial invoice must be less than final amount. Use CASH instead.',
-        );
-      }
-      remainingAmount = finalAmount - paidAmount;
-    }
-
-    // 5. حفظ الفاتورة في قاعدة البيانات
-    const newInvoice = new this.salesInvoiceModel({
-      invoiceNumber,
-      customerId: customer._id,
-      items: processedItems,
-      totalAmount: calculatedTotalAmount,
-      discount: dto.discount,
-      finalAmount,
-      paidAmount,
-      remainingAmount,
-      paymentType: dto.paymentType,
-      createdBy: new Types.ObjectId(userId),
-    });
-
-    const savedInvoice = await newInvoice.save();
-
-    // ─── 🔔 إطلاق حدث إنشاء فاتورة البيع تلقائياً لنظام التنبيهات ───
     try {
-      const invoiceData = savedInvoice as any;
-      const customerData = customer as any;
-      this.eventEmitter.emit('sales.invoice.created', {
-        id: invoiceData._id.toString(),
-        invoiceNumber: invoiceData.invoiceNumber,
-        finalAmount: invoiceData.finalAmount,
-        customerName:
-          customerData?.fullName || customerData?.name || 'عميل نقدي', // 👈 جلب الاسم الفعلي بأمان
-      });
-    } catch (error) {
-      console.error('Failed to emit sales invoice notification event:', error);
-    }
+      // 1. جلب بيانات العميل وصلاحيته بربطها بالـ session الحالية
+      // (تأكد أن سرفيس العميل يقبل سيسشن أو قم بالبحث المباشر هنا لحمايتها)
+      const customer = await this.customersService.findById(dto.customerId);
 
-    // 6. استدعاء محرك المخزن آلياً لخصم البضاعة بالقطع الفعلية (actualPieces)
-    for (const pItem of processedItems) {
-      await this.stockMovementsService.createMovement(
-        {
-          productId: pItem.productId.toString(),
-          type: 'SALE',
-          referenceType: 'SALES_INVOICE',
-          referenceId: invoiceNumber,
-          quantityChanged: -pItem.totalPieces, // 👈 التعديل هنا: الخصم بالقطع الفعلية التراكمية في كرت الهوية للمخزن
-          notes: `Automated stock deduction for invoice ${invoiceNumber} (${pItem.quantity} ${pItem.unitType})`,
-        },
-        userId,
-      );
-    }
+      const invoiceNumber = `INV-SALES-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      let calculatedTotalAmount = 0;
+      const processedItems = [];
 
-    // 7. استدعاء المحرك المالي للعملاء لتحديث الديون آلياً إذا كان هناك متبقي
-    if (remainingAmount > 0) {
-      await this.customersService.updateCustomerDebt(
-        customer._id.toString(),
+      // 2. فحص البضاعة والمخازن بدقة بالتزامن مع الـ session
+      for (const item of dto.items) {
+        if (!Types.ObjectId.isValid(item.productId)) {
+          throw new BadRequestException(
+            `Invalid Product ID: ${item.productId}`,
+          );
+        }
+
+        const product = await this.productModel
+          .findOne({
+            _id: new Types.ObjectId(item.productId),
+            isActive: true,
+          })
+          .session(session); // 👈 فحص المنتج وتجميده جوة الـ session حتي انتهاء العملية
+
+        if (!product) {
+          throw new NotFoundException(
+            `Product with ID "${item.productId}" not found.`,
+          );
+        }
+
+        // الحسبة الذكية للكرتونة والقطع
+        const actualPieces =
+          item.unitType === 'CARTON'
+            ? item.quantity * (product.piecesPerCarton || 1)
+            : item.quantity;
+
+        // صمام الأمان الصارم للمخزن السالب
+        if (product.quantityInPieces < actualPieces) {
+          throw new BadRequestException(
+            `Inadequate stock for "${product.name}"! Available: ${product.quantityInPieces} pcs, requested: ${actualPieces} pcs.`,
+          );
+        }
+
+        const itemTotal = item.quantity * item.price - item.discount;
+        if (itemTotal < 0) {
+          throw new BadRequestException(
+            `Discount for product "${product.name}" cannot exceed its total price.`,
+          );
+        }
+
+        calculatedTotalAmount += itemTotal;
+
+        const pieceCost = product.purchasePrice || 0;
+        const actualItemCost = actualPieces * pieceCost;
+
+        // ⚠️ ملاحظة: تم حذف سطر (product.quantityInPieces -= actualPieces) من هنا!
+        // لأن دالة stockMovementsService.createMovement هتقوم بالخصم والحفظ بنفسها جوة السيسشن
+        // وبكدة بنمنع الخصم المزدوج (Double Deduction).
+
+        processedItems.push({
+          productId: product._id,
+          quantity: item.quantity,
+          unitType: item.unitType,
+          price: item.price,
+          discount: item.discount,
+          total: itemTotal,
+          totalPieces: actualPieces,
+          totalCost: actualItemCost,
+        });
+      }
+
+      // 3. تطبيق الخصم الكلي للفاتورة
+      const finalAmount = calculatedTotalAmount - dto.discount;
+      if (finalAmount < 0) {
+        throw new BadRequestException(
+          'Main invoice discount cannot exceed the final total amount.',
+        );
+      }
+
+      // 4. ضبط حسابات الدفع والمديونية
+      let paidAmount = dto.paidAmount;
+      let remainingAmount = 0;
+
+      if (dto.paymentType === PaymentType.CASH) {
+        paidAmount = finalAmount;
+        remainingAmount = 0;
+      } else if (dto.paymentType === PaymentType.CREDIT) {
+        paidAmount = 0;
+        remainingAmount = finalAmount;
+      } else if (dto.paymentType === PaymentType.PARTIAL) {
+        if (paidAmount >= finalAmount) {
+          throw new BadRequestException(
+            'Paid amount for partial invoice must be less than final amount. Use CASH instead.',
+          );
+        }
+        remainingAmount = finalAmount - paidAmount;
+      }
+
+      // 5. حفظ الفاتورة في قاعدة البيانات مع تمرير الـ session صراحة
+      const newInvoice = new this.salesInvoiceModel({
+        invoiceNumber,
+        customerId: customer._id,
+        items: processedItems,
+        totalAmount: calculatedTotalAmount,
+        discount: dto.discount,
+        finalAmount,
+        paidAmount,
         remainingAmount,
-      );
+        paymentType: dto.paymentType,
+        createdBy: new Types.ObjectId(userId),
+      });
+
+      const savedInvoice = await newInvoice.save({ session }); // 👈 الحفظ داخل الـ session
+
+      // 6. استدعاء محرك المخزن آلياً وتمرير الـ session له ليقوم بالخصم والتسجيل معاً
+      for (const pItem of processedItems) {
+        await this.stockMovementsService.createMovement(
+          {
+            productId: pItem.productId.toString(),
+            type: 'SALE',
+            referenceType: 'SALES_INVOICE',
+            referenceId: invoiceNumber,
+            quantityChanged: pItem.totalPieces,
+            notes: `Automated stock deduction for invoice ${invoiceNumber}`,
+          },
+          userId,
+          session, // 👈 تمرير السيسشن هنا ليدخل في نطاق الـ Transaction
+        );
+      }
+
+      // 7. استدعاء المحرك المالي للعملاء لتحديث الديون آلياً مع تمرير الـ session
+      if (remainingAmount > 0) {
+        await this.customersService.updateCustomerDebt(
+          customer._id.toString(),
+          remainingAmount,
+          session, // 👈 تأكد من تعديل الدالة في كاستمر سرفيس لتقبل الـ session كباراميتر ثالث
+        );
+      }
+
+      // 🎯 نجحت كل الخطوات بدون أي Exception؟ ثبت البيانات فوراً في الداتابيز الحقيقية!
+      await session.commitTransaction();
+      session.endSession();
+
+      // ─── 🔔 إطلاق الإشعارات والأحداث المطبوعة (آمنة تماماً الآن بعد الـ Commit) ───
+      try {
+        this.eventEmitter.emit('sales.invoice.created', {
+          id: savedInvoice._id.toString(),
+          invoiceNumber: savedInvoice.invoiceNumber,
+          finalAmount: savedInvoice.finalAmount,
+          customerName: customer?.name || 'عميل نقدي',
+        });
+      } catch (error) {
+        console.error(
+          'Failed to emit sales invoice notification event:',
+          error,
+        );
+      }
+
+      return savedInvoice;
+    } catch (error) {
+      // 🚨 كارثة! حدث أي خطأ برمي في أي سطر؟ الغي كل التعديلات ورجّع المخزن والفلوس كما كانت!
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      throw error; // مرر الخطأ لـ Exception Filter الخاص بـ NestJS ليعرضه للمستخدم
+    } finally {
+      // قفل السيسشن نهائياً لتحرير الموارد من السيرفر
+      if (!session.hasEnded) {
+        session.endSession();
+      }
     }
-
-    return savedInvoice;
   }
-
   // ─── جلب الفواتير بالـ Pagination والبحث ────────────────────────────────
   async findAllInvoices(query: SalesInvoiceQueryDto): Promise<any> {
     const {

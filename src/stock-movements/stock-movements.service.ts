@@ -110,6 +110,7 @@ export class StockMovementsService {
   async createMovement(
     dto: CreateStockMovementDto,
     userId: string,
+    session?: any, // 👈 إدخال الـ session هنا لدعم الـ Transactions
   ): Promise<StockMovementDocument> {
     if (!Types.ObjectId.isValid(dto.productId)) {
       throw new BadRequestException('Invalid Product ObjectId');
@@ -117,11 +118,14 @@ export class StockMovementsService {
 
     const productObjectId = new Types.ObjectId(dto.productId);
 
-    // 1. جلب المنتج الحالي والتأكد من وجوده ونشاطه
-    const product = await this.productModel.findOne({
-      _id: productObjectId,
-      isActive: true,
-    });
+    // 1. جلب المنتج الحالي داخل الـ session لضمان عزل البيانات وحمايتها من الـ Race Conditions
+    const product = await this.productModel
+      .findOne({
+        _id: productObjectId,
+        isActive: true,
+      })
+      .session(session); // 👈 ربط الاستعلام بالـ session
+
     if (!product) {
       throw new NotFoundException(
         `Active Product with ID "${dto.productId}" not found`,
@@ -136,19 +140,16 @@ export class StockMovementsService {
     switch (dto.type) {
       case 'PURCHASE':
       case 'CUSTOMER_RETURN':
-        // الشراء ومرتجع العميل يزود المخزن
         quantityAfter = quantityBefore + quantityChanged;
         break;
 
       case 'SALE':
       case 'SUPPLIER_RETURN':
-        // البيع ومرتجع المورد ينقص المخزن
         quantityChanged = -quantityChanged; // تحويل الإشارة لسالب للتدقيق
         quantityAfter = quantityBefore + quantityChanged;
         break;
 
       case 'ADJUSTMENT':
-        // التعديل اليدوي (الجرد السنوي مثلاً) قد يكون بالزيادة أو النقصان بناء على المدخل الأصلي للـ DTO
         quantityChanged = dto.quantityChanged;
         quantityAfter = quantityBefore + quantityChanged;
         break;
@@ -164,12 +165,12 @@ export class StockMovementsService {
       );
     }
 
-    // 4. تحديث حقل المخزن جوه كوليكشن الـ Product
+    // 4. تحديث حقل المخزن جوه كوليكشن الـ Product مع تمرير الـ session
     product.quantityInPieces = quantityAfter;
     product.updatedBy = new Types.ObjectId(userId);
-    await product.save();
+    await product.save({ session }); // 👈 الحفظ داخل الـ session
 
-    // 5. حفظ السجل الكامل للحركة وعمل الـ Audit Trail
+    // 5. حفظ السجل الكامل للحركة وعمل الـ Audit Trail مع تمرير الـ session
     const movement = new this.stockMovementModel({
       productId: productObjectId,
       type: dto.type,
@@ -182,18 +183,27 @@ export class StockMovementsService {
       createdBy: new Types.ObjectId(userId),
     });
 
-    const savedMovement = await movement.save();
+    const savedMovement = await movement.save({ session }); // 👈 الحفظ داخل الـ session
 
-    try {
-      this.eventEmitter.emit('stock.movement.updated', {
-        productId: product._id.toString(),
-        productName: product.name,
-        newQty: quantityAfter, // الرصيد الفعلي الحالي
-        minQty: product.minimumQuantity, // الحد الأدنى الديناميكي من كارت الصنف
-        maxQty: product.maximumQuantity, // الحد الأقصى الديناميكي من كارت الصنف
-      });
-    } catch (error) {
-      console.error('Failed to emit stock movement notification event:', error);
+    // 💡 الإشعارات والـ Events يتم إطلاقها فقط خارج نطاق الـ Transaction أو بعد الـ Commit
+    // لأننا لو أطلقناها هنا وفشلت الفاتورة بعد ثانية، السيستم هيبعت إشعارات وهمية للمستخدمين!
+    if (!session) {
+      try {
+        this.eventEmitter.emit('stock.movement.updated', {
+          productId: product._id.toString(),
+          productName: product.name,
+          newQty: quantityAfter,
+          minQty: product.minimumQuantity,
+          maxQty: product.maximumQuantity,
+        });
+      } catch (error) {
+        console.error(
+          'Failed to emit stock movement notification event:',
+          error,
+        );
+      }
+    } else {
+      // لو إحنا جوه Transaction، يفضل تسجيل الحدث ليتم إطلاقه بعد نجاح الـ Commit بالكامل في السيرفيس الأساسي
     }
 
     return savedMovement;
