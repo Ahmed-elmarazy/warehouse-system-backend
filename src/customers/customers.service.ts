@@ -20,6 +20,7 @@ export class CustomersService {
     private readonly customerModel: Model<CustomerDocument>,
   ) {}
 
+  // ─── إنشاء عميل جديد وتوليد الكود تلقائياً ──────────────────────────────
   async create(dto: CreateCustomerDto): Promise<CustomerDocument> {
     const existingPhone = await this.customerModel
       .findOne({ phone: dto.phone, isActive: true })
@@ -38,13 +39,14 @@ export class CustomersService {
     const customer = new this.customerModel({
       ...dto,
       customerCode,
-      openingBalance: dto.openingBalance ?? 0, // 👈 حفظ الرصيد الافتتاحي
+      openingBalance: dto.openingBalance ?? 0, // حفظ الرصيد الافتتاحي
       currentDebt: 0,
     });
 
     return await customer.save();
   }
 
+  // ─── جلب كل العملاء (Pagination + Filtered Search) ───────────────────
   async findAll(query: CustomerQueryDto): Promise<{
     data: any[];
     total: number;
@@ -89,6 +91,7 @@ export class CustomersService {
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
+  // ─── جلب عميل معين بالـ ID ─────────────────────────────────────────────
   async findById(id: string): Promise<CustomerDocument> {
     if (!Types.ObjectId.isValid(id))
       throw new BadRequestException('Invalid Customer ID format');
@@ -100,6 +103,7 @@ export class CustomersService {
     return customer;
   }
 
+  // ─── تعديل بيانات عميل (Owner Only) ────────────────────────────────────
   async update(id: string, dto: UpdateCustomerDto): Promise<CustomerDocument> {
     const customer = await this.findById(id);
 
@@ -119,6 +123,7 @@ export class CustomersService {
       .exec();
   }
 
+  // ─── حذف عميل (Soft Delete) ───────────────────────────────────────────
   async remove(id: string): Promise<{ message: string }> {
     const customer = await this.findById(id);
     await this.customerModel
@@ -129,6 +134,7 @@ export class CustomersService {
     };
   }
 
+  // ─── المحرك المالي الداخلي: تحديث مديونية العميل مع دعم الـ Transactions ───
   async updateCustomerDebt(
     customerId: string,
     amount: number,
@@ -152,7 +158,7 @@ export class CustomersService {
       );
   }
 
-  // ─── كشف الحساب المالي المطور بدمج الرصيد الافتتاحي ───
+  // ─── كشف الحساب المالي المطور بدمج الرصيد الافتتاحي بشكل صحيح ───
   async getCustomerStatement(id: string): Promise<any> {
     const customer = await this.findById(id);
 
@@ -175,6 +181,7 @@ export class CustomersService {
         .exec(),
     ]);
 
+    // حساب إجماليات الفواتير لغرض العرض فقط في ملخص الحساب
     const totalSalesAmount = invoices.reduce(
       (sum: number, inv: any) => sum + (inv.finalAmount || 0),
       0,
@@ -183,20 +190,16 @@ export class CustomersService {
       (sum: number, inv: any) => sum + (inv.paidAmount || 0),
       0,
     );
-    const totalInvoiceRemaining = invoices.reduce(
-      (sum: number, inv: any) => sum + (inv.remainingAmount || 0),
-      0,
-    );
 
     const totalCreditReturns = returns
       .filter((ret: any) => ret.returnType === 'CREDIT')
       .reduce((sum: number, ret: any) => sum + (ret.totalAmount || 0), 0);
 
-    // 🛡️ صمام الأمان: المديونية تشمل الـ Opening Balance ولكن الـ totalPurchasedAmount (المبيعات للداش بورد) تظل نظيفة تماماً!
+    // 🚀 [التصحيح الرياضي]: المديونية النهائية الشاملة هي مجموع (الافتتاحي المتغير + الحالي المسجل) بالملي
     const openingBalance = customer.openingBalance || 0;
-    const rawOutstandingDebt =
-      openingBalance + totalInvoiceRemaining - totalCreditReturns;
-    const currentOutstandingDebt = Math.round(rawOutstandingDebt * 100) / 100;
+    const currentDebt = customer.currentDebt || 0;
+    const finalOutstandingDebt =
+      Math.round((openingBalance + currentDebt) * 100) / 100;
 
     // تجهيز كشف الحركات التجميعي التاريخي وتضمين الرصيد الافتتاحي كأول حركة دايماً
     const timeline: any[] = [
@@ -205,7 +208,7 @@ export class CustomersService {
         referenceId: 'START-BAL',
         amount: openingBalance,
         date: (customer as any).createdAt,
-        notes: 'الرصيد المالي الافتتاحي للمديونية السابقة',
+        notes: 'الرصيد المالي الافتتاحي للمديونية السابقة أول المدة',
       },
     ];
 
@@ -216,25 +219,25 @@ export class CustomersService {
         customerCode: customer.customerCode,
         phone: customer.phone,
         openingBalance,
-        actualSavedDebt: customer.currentDebt,
-        totalRequiredDebt: openingBalance + customer.currentDebt, // إجمالي المطلوب النهائي من العميل
+        actualSavedDebt: currentDebt,
+        totalRequiredDebt: finalOutstandingDebt, // 👈 إجمالي المطلوب النهائي والواقعي من العميل الشامل للمدفوعات السابقة
       },
       financialSummary: {
-        totalPurchasedAmount: Math.round(totalSalesAmount * 100) / 100, // المبيعات صافية 100% للداش بورد
+        totalPurchasedAmount: Math.round(totalSalesAmount * 100) / 100, // مبيعات صافية 100% للداش بورد بدون تضخم
         totalPaidAmount: Math.round(totalPaidFromInvoices * 100) / 100,
         totalCreditReturnsAmount: Math.round(totalCreditReturns * 100) / 100,
-        currentOutstandingDebt: Math.max(0, currentOutstandingDebt),
+        currentOutstandingDebt: Math.max(0, finalOutstandingDebt), // حماية من السوالب التجميلية في الإجمالي الكلي
         totalPaymentReceiptsCount: payments.length,
       },
       history: {
-        statementTimeline: timeline, // يمكن دمج باقي الفواتير والسندات في الفرونت إند هنا
+        statementTimeline: timeline, // رصيد البداية ثابت، والفرونت يدمج باقي مصفوفات الحركات ويرتبها تاريخياً
         invoices: invoices.map((inv: any) => ({
           invoiceNumber: inv.invoiceNumber,
           finalAmount: inv.finalAmount,
           paidAmount: inv.paidAmount,
           remainingAmount: inv.remainingAmount,
           paymentType: inv.paymentType,
-          date: inv.date,
+          date: inv.createdAt, // 👈 تصحيح: الحقل الصح في السكيما هو createdAt
         })),
         payments: payments.map((pay: any) => ({
           paymentNumber: pay.paymentNumber,

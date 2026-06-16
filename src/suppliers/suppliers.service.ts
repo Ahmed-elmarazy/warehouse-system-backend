@@ -57,9 +57,7 @@ export class SuppliersService {
     return await supplier.save();
   }
 
-  async findAll(
-    query: SupplierQueryDto,
-  ): Promise<{
+  async findAll(query: SupplierQueryDto): Promise<{
     data: any[];
     total: number;
     page: number;
@@ -176,13 +174,31 @@ export class SuppliersService {
       );
   }
 
+  // 📄 src/suppliers/suppliers.service.ts
+
+  // ─── 🌟 [تحديث] تسجيل دفعة مالية للمورد مع دعم الرصيد الافتتاحي الشامل 🌟 ───
   async createPayment(
     supplierId: string,
     dto: CreateSupplierPaymentDto,
     userId: string,
   ): Promise<SupplierPaymentDocument> {
+    // 1. جلب المورد الأساسي
     const supplier = await this.findById(supplierId);
 
+    // 🚀 حساب المديونية الشاملة للمورد (الافتتاحية + الناتجة عن السيستم)
+    const supplierOpening = supplier.openingBalance || 0;
+    const supplierCurrent = supplier.balance || 0;
+    const totalSupplierDebt =
+      Math.round((supplierOpening + supplierCurrent) * 100) / 100;
+
+    // 🚨 التحقق الصارم لعدم دفع مبلغ أكبر من إجمالي مستحقات المورد
+    if (dto.amount > totalSupplierDebt) {
+      throw new BadRequestException(
+        `Overpayment rejected! Supplier total comprehensive balance is ${totalSupplierDebt} (Opening: ${supplierOpening}, Current: ${supplierCurrent}), but you tried to pay ${dto.amount}.`,
+      );
+    }
+
+    // 2. إنشاء مستند السند المالي للمورد
     const payment = new this.supplierPaymentModel({
       supplierId: supplier._id,
       amount: dto.amount,
@@ -191,14 +207,15 @@ export class SuppliersService {
     });
 
     const savedPayment = await payment.save();
+
+    // 📉 خصم الدفعة مباشرة من مديونية المورد (بالسالب) لتقلل الحساب التراكمي
     await this.updateSupplierBalance(supplier._id.toString(), -dto.amount);
+
     return savedPayment;
   }
 
   // ─── كشف حساب المورد الشامل بعد دمج الرصيد الافتتاحي المستحق ───
-  async getStatement(
-    supplierId: string,
-  ): Promise<{
+  async getStatement(supplierId: string): Promise<{
     totalPurchased: number;
     totalPaid: number;
     remainingDebt: number;

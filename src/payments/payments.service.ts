@@ -40,62 +40,64 @@ export class PaymentsService {
     session.startTransaction();
 
     try {
-      // التأكد من وجود العميل أولاً
+      // 1. التأكد من وجود العميل وجلب بياناته (بما فيها الرصيد الافتتاحي والحالي)
       const customer = await this.customersService.findById(dto.customerId);
       const customerObjectId = new Types.ObjectId(customer._id.toString());
 
-      // 🛡️ مصدر الحقيقة: جلب الفواتير المفتوحة للعميل مرتبة من الأقدم للأحدث
+      // 2. جلب الفواتير المفتوحة للعميل مرتبة من الأقدم للأحدث لتطبيق الـ FIFO
       const unpaidInvoices = await this.salesInvoiceModel
         .find({
           customerId: customerObjectId,
           isActive: true,
           remainingAmount: { $gt: 0 },
         })
-        .sort({ createdAt: 1 }) // الترتيب تصاعدي لتطبيق FIFO
+        .sort({ createdAt: 1 })
         .session(session)
         .exec();
 
-      // حساب المديونية الفعلية ديناميكياً وعالمباشر من الفواتير
-      const actualCalculatedDebt = unpaidInvoices.reduce(
+      // 3. حساب مديونية فواتير السيستم الحالية
+      const actualInvoiceDebt = unpaidInvoices.reduce(
         (sum, inv) => sum + inv.remainingAmount,
         0,
       );
 
-      // 🚨 التحقق الصارم من الخصم الزائد (Overpayment Rejection)
-      if (dto.amount > actualCalculatedDebt) {
+      // 🚀 [التعديل المحاسبي الجديد]: حساب إجمالي المديونية الشاملة (الافتتاحي + فواتير السيستم)
+      const openingBalance = customer.openingBalance || 0;
+      const totalDebt =
+        Math.round((openingBalance + actualInvoiceDebt) * 100) / 100;
+
+      // 🚨 التحقق الصارم الجديد من الخصم الزائد بناءً على المجموع الكلي
+      if (dto.amount > totalDebt) {
         throw new BadRequestException(
-          `Overpayment rejected! Customer actual calculated debt is ${actualCalculatedDebt}, but you tried to pay ${dto.amount}.`,
+          `Overpayment rejected! Customer total comprehensive debt is ${totalDebt} (Opening: ${openingBalance}, Invoices: ${actualInvoiceDebt}), but you tried to pay ${dto.amount}.`,
         );
       }
 
       let cacheAmountToDistribute = dto.amount;
       const affectedInvoiceIds: Types.ObjectId[] = [];
 
-      // 🔄 محرك الـ FIFO لتوزيع مبلغ السداد على الفواتير المفتوحة
+      // 🔄 محرك الـ FIFO لتوزيع مبلغ السداد على الفواتير المفتوحة (إن وُجدت)
       for (const invoice of unpaidInvoices) {
         if (cacheAmountToDistribute <= 0) break;
 
         affectedInvoiceIds.push(invoice._id as Types.ObjectId);
 
         if (cacheAmountToDistribute >= invoice.remainingAmount) {
-          // المبلغ يغطي كامل الفاتورة أو يفيض
           cacheAmountToDistribute -= invoice.remainingAmount;
           invoice.paidAmount += invoice.remainingAmount;
           invoice.remainingAmount = 0;
-          invoice.paymentType = 'CASH'; // إغلاق كامل
+          invoice.paymentType = 'CASH';
         } else {
-          // المبلغ يغطي جزء من الفاتورة فقط
           invoice.paidAmount += cacheAmountToDistribute;
           invoice.remainingAmount -= cacheAmountToDistribute;
-          invoice.paymentType = 'PARTIAL'; // إغلاق جزئي
+          invoice.paymentType = 'PARTIAL';
           cacheAmountToDistribute = 0;
         }
 
-        // حفظ التحديثات على الفاتورة داخل الـ session
         await invoice.save({ session });
       }
 
-      // تسجيل وإصدار سند السداد المالي للـ Audit Trail
+      // 4. تسجيل وإصدار سند السداد المالي للـ Audit Trail
       const paymentNumber = `PAY-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
       const newPayment = new this.paymentModel({
@@ -110,16 +112,18 @@ export class PaymentsService {
 
       const savedPayment = await newPayment.save({ session });
 
-      // تحديث حقل العميل تجميلياً ليطابق الحساب المالي الجديد
+      // 📉 تحديث مديونية العميل الإجمالية (يطرح المبلغ المدفوع بالكامل من الـ currentDebt)
+      // ملحوظة: لو سدد من الـ Opening Balance، سيتجه الـ currentDebt للسالب، والمجموع (افتتاحي + حالي) سيكون دقيقاً 100%
       await this.customersService.updateCustomerDebt(
         customer._id.toString(),
         -dto.amount,
+        session, // مررت الـ session لضمان الـ ACID والـ Rollback عند الفشل
       );
 
       await session.commitTransaction();
       session.endSession();
 
-      // ─── 🔔 3. إطلاق حدث استلام المقبوضات فوراً خارج الـ Transaction لـ WebSockets ───
+      // 🔔 إطلاق حدث استلام المقبوضات فوراً خارج الـ Transaction لـ WebSockets
       try {
         const customerData = customer as any;
         this.eventEmitter.emit('customer.payment.received', {
