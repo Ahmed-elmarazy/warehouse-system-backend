@@ -17,8 +17,8 @@ import { SalesInvoiceQueryDto } from './dto/sales-invoice-query.dto';
 import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { CustomersService } from '../customers/customers.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { InjectConnection } from '@nestjs/mongoose'; // 👈 استيراد الـ InjectConnection
-import { Connection } from 'mongoose'; // 👈 استيراد Connection من mongoose
+import { InjectConnection } from '@nestjs/mongoose';
+import { Connection } from 'mongoose';
 
 @Injectable()
 export class SalesInvoicesService {
@@ -30,11 +30,12 @@ export class SalesInvoicesService {
     @InjectModel('Product')
     private readonly productModel: Model<any>,
 
-    @InjectConnection() private readonly connection: Connection, // 👈 حقن الـ Mongoose Connection هنا
+    @InjectConnection() private readonly connection: Connection,
     private readonly stockMovementsService: StockMovementsService,
     private readonly customersService: CustomersService,
   ) {}
 
+  // ─── 1️⃣ إنشاء فاتورة بيع جديدة ───────────────────────────────────────────
   async createInvoice(
     dto: CreateSalesInvoiceDto,
     userId: string,
@@ -50,8 +51,7 @@ export class SalesInvoicesService {
     session.startTransaction();
 
     try {
-      // 1. جلب بيانات العميل وصلاحيته بربطها بالـ session الحالية
-      // (تأكد أن سرفيس العميل يقبل سيسشن أو قم بالبحث المباشر هنا لحمايتها)
+      // 1. جلب بيانات العميل وصلاحيته
       const customer = await this.customersService.findById(dto.customerId);
 
       const invoiceNumber = `INV-SALES-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -103,10 +103,6 @@ export class SalesInvoicesService {
 
         const pieceCost = product.purchasePrice || 0;
         const actualItemCost = actualPieces * pieceCost;
-
-        // ⚠️ ملاحظة: تم حذف سطر (product.quantityInPieces -= actualPieces) من هنا!
-        // لأن دالة stockMovementsService.createMovement هتقوم بالخصم والحفظ بنفسها جوة السيسشن
-        // وبكدة بنمنع الخصم المزدوج (Double Deduction).
 
         processedItems.push({
           productId: product._id,
@@ -161,7 +157,7 @@ export class SalesInvoicesService {
         createdBy: new Types.ObjectId(userId),
       });
 
-      const savedInvoice = await newInvoice.save({ session }); // 👈 الحفظ داخل الـ session
+      const savedInvoice = await newInvoice.save({ session });
 
       // 6. استدعاء محرك المخزن آلياً وتمرير الـ session له ليقوم بالخصم والتسجيل معاً
       for (const pItem of processedItems) {
@@ -175,7 +171,7 @@ export class SalesInvoicesService {
             notes: `Automated stock deduction for invoice ${invoiceNumber}`,
           },
           userId,
-          session, // 👈 تمرير السيسشن هنا ليدخل في نطاق الـ Transaction
+          session,
         );
       }
 
@@ -184,15 +180,15 @@ export class SalesInvoicesService {
         await this.customersService.updateCustomerDebt(
           customer._id.toString(),
           remainingAmount,
-          session, // 👈 تأكد من تعديل الدالة في كاستمر سرفيس لتقبل الـ session كباراميتر ثالث
+          session,
         );
       }
 
-      // 🎯 نجحت كل الخطوات بدون أي Exception؟ ثبت البيانات فوراً في الداتابيز الحقيقية!
+      // 🎯 نجحت كل الخطوات بدون أي Exception؟ ثبت البيانات فوراً!
       await session.commitTransaction();
       session.endSession();
 
-      // ─── 🔔 إطلاق الإشعارات والأحداث المطبوعة (آمنة تماماً الآن بعد الـ Commit) ───
+      // ─── 🔔 إطلاق الإشعارات والأحداث المطبوعة ───
       try {
         this.eventEmitter.emit('sales.invoice.created', {
           id: savedInvoice._id.toString(),
@@ -209,19 +205,226 @@ export class SalesInvoicesService {
 
       return savedInvoice;
     } catch (error) {
-      // 🚨 كارثة! حدث أي خطأ برمي في أي سطر؟ الغي كل التعديلات ورجّع المخزن والفلوس كما كانت!
       if (session.inTransaction()) {
         await session.abortTransaction();
       }
-      throw error; // مرر الخطأ لـ Exception Filter الخاص بـ NestJS ليعرضه للمستخدم
+      throw error;
     } finally {
-      // قفل السيسشن نهائياً لتحرير الموارد من السيرفر
       if (!session.hasEnded) {
         session.endSession();
       }
     }
   }
-  // ─── جلب الفواتير بالـ Pagination والبحث ────────────────────────────────
+
+  // ─── 2️⃣ تحديث فاتورة بيع قائمة مع عكس الأثر المخزني والمالي بالكامل ───────────
+  async updateInvoice(
+    id: string,
+    dto: CreateSalesInvoiceDto,
+    userId: string,
+  ): Promise<SalesInvoiceDocument> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid Invoice ID format');
+    }
+
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException(
+        'Sales invoice must contain at least one item.',
+      );
+    }
+
+    const session = await this.connection.startSession();
+    session.startTransaction();
+
+    try {
+      // 1. جلب الفاتورة القديمة والتأكد من وجودها ونشاطها
+      const oldInvoice = await this.salesInvoiceModel
+        .findOne({ _id: new Types.ObjectId(id), isActive: true })
+        .session(session)
+        .exec();
+
+      if (!oldInvoice) {
+        throw new NotFoundException(
+          `Sales Invoice with ID "${id}" not found or inactive.`,
+        );
+      }
+
+      // 2. ⏪ [عكس تأثير الفاتورة القديمة] ⏪
+      // أ) إعادة كميات البضائع السابقة إلى المخزن (حركة تزويد مخزن)
+      for (const oldItem of oldInvoice.items) {
+        await this.stockMovementsService.createMovement(
+          {
+            productId: oldItem.productId.toString(),
+            type: 'PURCHASE', // حركة عكسية (وارد) لإعادة توازن كارت الصنف والمخزن
+            referenceType: 'SALES_INVOICE',
+            referenceId: oldInvoice.invoiceNumber,
+            quantityChanged: oldItem.totalPieces,
+            notes: `Reverting old stock for invoice update ${oldInvoice.invoiceNumber}`,
+          },
+          userId,
+          session,
+        );
+      }
+
+      // ب) إنقاص مديونية العميل القديم بقيمة المتبقي السابق للفاتورة
+      if (oldInvoice.remainingAmount > 0) {
+        await this.customersService.updateCustomerDebt(
+          oldInvoice.customerId.toString(),
+          -oldInvoice.remainingAmount, // تمرير القيمة بالسالب للتخفيض المالي
+          session,
+        );
+      }
+
+      // 3. ⏩ [تطبيق تأثير الفاتورة الجديدة] ⏩
+      const customer = await this.customersService.findById(dto.customerId);
+      let calculatedTotalAmount = 0;
+      const processedItems = [];
+
+      // فحص وتجهيز الأصناف الجديدة مع التحقق الصارم من المخزن بعد الـ Revert
+      for (const item of dto.items) {
+        if (!Types.ObjectId.isValid(item.productId)) {
+          throw new BadRequestException(
+            `Invalid Product ID: ${item.productId}`,
+          );
+        }
+
+        const product = await this.productModel
+          .findOne({ _id: new Types.ObjectId(item.productId), isActive: true })
+          .session(session);
+
+        if (!product) {
+          throw new NotFoundException(
+            `Product with ID "${item.productId}" not found.`,
+          );
+        }
+
+        const actualPieces =
+          item.unitType === 'CARTON'
+            ? item.quantity * (product.piecesPerCarton || 1)
+            : item.quantity;
+
+        // صمام الأمان الصارم للمخزن السالب على الحسبة الجديدة
+        if (product.quantityInPieces < actualPieces) {
+          throw new BadRequestException(
+            `Inadequate stock for "${product.name}"! Available after revert: ${product.quantityInPieces} pcs, requested: ${actualPieces} pcs.`,
+          );
+        }
+
+        const itemTotal = item.quantity * item.price - item.discount;
+        if (itemTotal < 0) {
+          throw new BadRequestException(
+            `Discount for product "${product.name}" cannot exceed its total price.`,
+          );
+        }
+
+        calculatedTotalAmount += itemTotal;
+        const pieceCost = product.purchasePrice || 0;
+        const actualItemCost = actualPieces * pieceCost;
+
+        processedItems.push({
+          productId: product._id,
+          quantity: item.quantity,
+          unitType: item.unitType,
+          price: item.price,
+          discount: item.discount,
+          total: itemTotal,
+          totalPieces: actualPieces,
+          totalCost: actualItemCost,
+        });
+      }
+
+      // تطبيق الخصم الكلي الجديد
+      const finalAmount = calculatedTotalAmount - dto.discount;
+      if (finalAmount < 0) {
+        throw new BadRequestException(
+          'Main invoice discount cannot exceed the final total amount.',
+        );
+      }
+
+      // ضبط حسابات الدفع والمديونية الجديدة
+      let paidAmount = dto.paidAmount;
+      let remainingAmount = 0;
+
+      if (dto.paymentType === PaymentType.CASH) {
+        paidAmount = finalAmount;
+        remainingAmount = 0;
+      } else if (dto.paymentType === PaymentType.CREDIT) {
+        paidAmount = 0;
+        remainingAmount = finalAmount;
+      } else if (dto.paymentType === PaymentType.PARTIAL) {
+        if (paidAmount >= finalAmount) {
+          throw new BadRequestException(
+            'Paid amount for partial invoice must be less than final amount. Use CASH instead.',
+          );
+        }
+        remainingAmount = finalAmount - paidAmount;
+      }
+
+      // 4. 📉 خصم الكميات الجديدة من المخزن وتسجيل حركة الـ SALE المحدثة
+      for (const pItem of processedItems) {
+        await this.stockMovementsService.createMovement(
+          {
+            productId: pItem.productId.toString(),
+            type: 'SALE',
+            referenceType: 'SALES_INVOICE',
+            referenceId: oldInvoice.invoiceNumber,
+            quantityChanged: pItem.totalPieces,
+            notes: `Automated stock deduction for updated invoice ${oldInvoice.invoiceNumber}`,
+          },
+          userId,
+          session,
+        );
+      }
+
+      // 5. 📈 إضافة المديونية الجديدة لحساب العميل الحالي
+      if (remainingAmount > 0) {
+        await this.customersService.updateCustomerDebt(
+          customer._id.toString(),
+          remainingAmount,
+          session,
+        );
+      }
+
+      // 6. 📝 تحديث مستند الفاتورة نفسه وحفظ التعديلات
+      oldInvoice.customerId = customer._id;
+      oldInvoice.items = processedItems as any;
+      oldInvoice.totalAmount = calculatedTotalAmount;
+      oldInvoice.discount = dto.discount;
+      oldInvoice.finalAmount = finalAmount;
+      oldInvoice.paidAmount = paidAmount;
+      oldInvoice.remainingAmount = remainingAmount;
+      oldInvoice.paymentType = dto.paymentType;
+      oldInvoice.updatedBy = new Types.ObjectId(userId); // 👈 احذف "as any" من هنا
+      const updatedInvoice = await oldInvoice.save({ session });
+
+      await session.commitTransaction();
+      session.endSession();
+
+      // إطلاق حدث التحديث لإشعار الـ Sockets والأنظمة الخارجية للـ Real-time
+      try {
+        this.eventEmitter.emit('sales.invoice.updated', {
+          id: updatedInvoice._id.toString(),
+          invoiceNumber: updatedInvoice.invoiceNumber,
+          finalAmount: updatedInvoice.finalAmount,
+          customerName: customer?.name || 'عميل نقدي',
+        });
+      } catch (error) {
+        console.error('Failed to emit sales invoice update event:', error);
+      }
+
+      return updatedInvoice;
+    } catch (error) {
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      throw error;
+    } finally {
+      if (!session.hasEnded) {
+        session.endSession();
+      }
+    }
+  }
+
+  // ─── 3️⃣ جلب الفواتير بالـ Pagination والبحث ────────────────────────────────
   async findAllInvoices(query: SalesInvoiceQueryDto): Promise<any> {
     const {
       page = 1,
@@ -261,7 +464,7 @@ export class SalesInvoicesService {
         .populate('customerId', 'name customerCode phone')
         .populate({
           path: 'items.productId',
-          select: 'name code price piecesPerCarton purchasePrice', // 💡 أضفنا الـ purchasePrice للاحتياط
+          select: 'name code price piecesPerCarton purchasePrice',
           options: { strictPopulate: false },
         })
         .populate('createdBy', 'name email')
@@ -282,7 +485,7 @@ export class SalesInvoicesService {
     };
   }
 
-  // ─── جلب تفاصيل فاتورة واحدة ───────────────────────────────────────────
+  // ─── 4️⃣ جلب تفاصيل فاتورة واحدة ───────────────────────────────────────────
   async findInvoiceById(id: string): Promise<any> {
     if (!Types.ObjectId.isValid(id)) {
       throw new BadRequestException('Invalid Invoice ID format');
@@ -302,7 +505,7 @@ export class SalesInvoicesService {
     return invoice;
   }
 
-  // ─── الحذف المؤقت لفاتورة (Soft Delete) ──────────────────────────────────
+  // ─── 5️⃣ الحذف المؤقت لفاتورة (Soft Delete) ──────────────────────────────────
   async deleteInvoice(id: string): Promise<void> {
     if (!Types.ObjectId.isValid(id)) {
       throw new BadRequestException('Invalid Invoice ID format');

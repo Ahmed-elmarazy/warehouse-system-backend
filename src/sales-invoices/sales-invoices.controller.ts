@@ -10,6 +10,7 @@ import {
   Request,
   HttpCode,
   HttpStatus,
+  Put,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -84,6 +85,31 @@ export class SalesInvoicesController {
       success: true,
       message: 'Sales invoice details retrieved successfully',
       data: invoice,
+    };
+  }
+
+  @Put(':id')
+  @Roles(Role.OWNER) // الـ Owner فقط هو من يملك صلاحية تعديل الحسابات والفواتير المغلقة لضمان الأمان المالي
+  @ApiOperation({
+    summary:
+      'Update an existing sales invoice (Reverts old impact and applies new changes)',
+  })
+  @ApiParam({ name: 'id', description: 'Sales Invoice MongoDB ObjectId' })
+  async update(
+    @Param('id') id: string,
+    @Body() dto: CreateSalesInvoiceDto,
+    @Request() req: any,
+  ) {
+    const updatedInvoice = await this.salesInvoicesService.updateInvoice(
+      id,
+      dto,
+      req.user.id,
+    );
+    return {
+      success: true,
+      message:
+        'Sales invoice updated successfully. Inventory and accounting balances recalculated.',
+      data: updatedInvoice,
     };
   }
 

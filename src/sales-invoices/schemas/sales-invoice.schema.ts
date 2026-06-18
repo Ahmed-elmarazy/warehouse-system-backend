@@ -81,6 +81,9 @@ export class SalesInvoice {
 
   @Prop({ type: Types.ObjectId, ref: 'Employee', default: null }) // جعلناه اختياري لتفادي مشاكل الـ Seed أو التيست بدون توكن
   createdBy: Types.ObjectId;
+
+  @Prop({ type: Types.ObjectId, ref: 'Employee', default: null })
+  updatedBy: Types.ObjectId;
 }
 
 export const SalesInvoiceSchema = SchemaFactory.createForClass(SalesInvoice);
