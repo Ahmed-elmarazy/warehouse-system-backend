@@ -5,7 +5,6 @@ import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import type { Express } from 'express';
-import helmet from 'helmet';
 
 const SWAGGER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14';
 
@@ -37,8 +36,6 @@ async function createApp(): Promise<Express> {
 
   app.useGlobalFilters(new GlobalExceptionFilter());
   app.useGlobalInterceptors(new ResponseInterceptor());
-
-  app.use(helmet());
 
   // ─── إعداد السواجر بالاسم الأصلي وحقن رابط الـ JSON تحت العنوان ───
   const swaggerConfig = new DocumentBuilder()
