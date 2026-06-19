@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import type { Express } from 'express';
+import helmet from 'helmet';
 
 const SWAGGER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14';
 
@@ -25,6 +26,42 @@ async function createApp(): Promise<Express> {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
   });
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: [`'self'`],
+          scriptSrc: [
+            `'self'`,
+            // Allow the exact CDN origin — no wildcards needed
+            'https://cdnjs.cloudflare.com',
+            // Required: Swagger UI injects an inline script to boot the UI.
+            // Instead of 'unsafe-inline', use a nonce or this safer option:
+            `'unsafe-inline'`, // ← see note below about nonce alternative
+          ],
+          styleSrc: [
+            `'self'`,
+            'https://cdnjs.cloudflare.com',
+            `'unsafe-inline'`, // Swagger UI injects inline <style> blocks
+          ],
+          imgSrc: [
+            `'self'`,
+            'data:', // Swagger UI uses data: URIs for some icons
+            'https://cdnjs.cloudflare.com',
+          ],
+          connectSrc: [
+            `'self'`, // Allows the "Try it out" fetch calls
+          ],
+          fontSrc: [`'self'`, 'https://cdnjs.cloudflare.com'],
+          objectSrc: [`'none'`],
+          upgradeInsecureRequests: [],
+        },
+      },
+      // Cross-origin isolation: allow Swagger iframe embed if needed
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
 
   app.useGlobalPipes(
     new ValidationPipe({
