@@ -71,10 +71,15 @@ export class ProductsService {
     limit: number;
     totalPages: number;
   }> {
-    const { page = 1, limit = 10, search, categoryId } = query;
+    const { page = 1, limit = 10, search, categoryId, includeInactive } = query;
     const skip = (page - 1) * limit;
 
-    const filter: Record<string, any> = { isActive: true };
+    // 🧠 بناء الفلتر ديناميكياً: لو includeInactive بـ true، لا نشترط الـ isActive
+    const filter: Record<string, any> = {};
+
+    if (includeInactive !== true) {
+      filter.isActive = true; // الافتراضي: جلب المنتجات النشطة فقط
+    }
 
     if (search) {
       const escaped = this.escapeRegex(search);
@@ -108,7 +113,6 @@ export class ProductsService {
       totalPages: Math.ceil(total / limit),
     };
   }
-
   // ─── Find One ─────────────────────────────────────────────────────────────
   // 💡 دعم الـ session اختياريًا لضمان قراءة أدق الكميات أثناء جرد الفواتير
   async findProductById(id: string, session?: any): Promise<ProductDocument> {

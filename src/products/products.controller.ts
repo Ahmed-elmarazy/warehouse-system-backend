@@ -89,7 +89,8 @@ export class ProductsController {
   @Get()
   @Roles(Role.OWNER, Role.EMPLOYEE)
   @ApiOperation({
-    summary: 'Get all active products — paginated + searchable + filterable',
+    summary:
+      'Get products — paginated + searchable + filterable (Supports toggling inactive products)',
   })
   async findAll(@Query() query: ProductQueryDto) {
     const result = await this.productsService.findAllProducts(query);
@@ -97,7 +98,7 @@ export class ProductsController {
       success: true,
       message: 'Products retrieved successfully',
       data: {
-        products: result.data, // راجع جاهز وخفيف من الـ lean() مباشرة
+        products: result.data,
         pagination: {
           total: result.total,
           page: result.page,
@@ -107,7 +108,7 @@ export class ProductsController {
       },
     };
   }
-
+  
   @Get(':id')
   @Roles(Role.OWNER, Role.EMPLOYEE)
   @ApiOperation({ summary: 'Get product by ID' })

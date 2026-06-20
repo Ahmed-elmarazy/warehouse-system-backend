@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsString,
   Min,
+  IsBoolean,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
@@ -43,5 +44,18 @@ export class ProductQueryDto {
   @IsMongoId()
   categoryId?: string;
 
- 
+  // 🚀 [إضافة حقل التحكم في المنتجات المؤرشفة وغير النشطة]
+  @ApiPropertyOptional({
+    type: Boolean,
+    example: false,
+    description: 'Include inactive/soft-deleted products in the results',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === 'true' || value === true) return true;
+    if (value === 'false' || value === false) return false;
+    return undefined;
+  })
+  @IsBoolean()
+  includeInactive?: boolean = false; // الوضع الافتراضي يعرض النشط فقط لحماية دورة المبيعات
 }
