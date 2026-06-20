@@ -113,6 +113,7 @@ export class ProductsService {
       totalPages: Math.ceil(total / limit),
     };
   }
+
   // ─── Find One ─────────────────────────────────────────────────────────────
   // 💡 دعم الـ session اختياريًا لضمان قراءة أدق الكميات أثناء جرد الفواتير
   async findProductById(id: string, session?: any): Promise<ProductDocument> {
@@ -121,7 +122,7 @@ export class ProductsService {
       .session(session) // 👈 ربط السيسشن إن وجدت
       .populate('categoryId', 'name _id')
       .populate('createdBy', 'name email _id')
-      .populate('updatedBy', 'name email _id')
+      .populate('populateUpdatedBy', 'name email _id')
       .exec();
 
     if (!product) {
@@ -138,8 +139,9 @@ export class ProductsService {
     ownerId: string,
     session?: any, // 👈 تمرير الـ session لحماية التحديث المتزامن
   ): Promise<ProductDocument> {
+    // 🧠 [تعديل أساسي]: شيلنا شرط الـ { isActive: true } عشان يقبل يجيب المنتج المؤرشف ويعدل حالته لـ Active تاني
     const existing = await this.productModel
-      .findOne({ _id: this.toObjectId(id, 'id'), isActive: true })
+      .findOne({ _id: this.toObjectId(id, 'id') })
       .session(session);
 
     if (!existing) {
@@ -151,7 +153,8 @@ export class ProductsService {
       : existing.categoryId;
 
     if (dto.code && dto.code !== existing.code) {
-      await this.ensureUniqueCode(dto.code, id, session);
+      // نمرر الـ true كمعامل رابع للسماح بالتحقق من الـ Unique SKU حتى مع وجود الكود لمنتج غير نشط
+      await this.ensureUniqueCode(dto.code, id, session, true);
     }
 
     const newMin = dto.minimumQuantity ?? existing.minimumQuantity;
@@ -177,7 +180,7 @@ export class ProductsService {
       'minimumQuantity',
       'maximumQuantity',
       'notes',
-      'isActive',
+      'isActive', // 🚀 مسموح الآن باستقبال القيمة وتحديث حالة النشاط من لوحة التحكم
     ] as const;
 
     for (const field of directFields) {
@@ -255,11 +258,16 @@ export class ProductsService {
     code: string,
     excludeId?: string,
     session?: any,
+    allowInactiveDuplicates = false,
   ): Promise<void> {
     const filter: Record<string, any> = {
       code: { $regex: `^${this.escapeRegex(code)}$`, $options: 'i' },
-      isActive: true,
     };
+
+    // لو مش مسموح بالتشابه مع الأصناف المؤرشفة، بنقفل الفحص ع النشط فقط
+    if (!allowInactiveDuplicates) {
+      filter.isActive = true;
+    }
 
     if (excludeId) filter._id = { $ne: new Types.ObjectId(excludeId) };
 
