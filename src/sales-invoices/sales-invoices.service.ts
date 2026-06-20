@@ -217,6 +217,7 @@ export class SalesInvoicesService {
   }
 
   // ─── 2️⃣ تحديث فاتورة بيع قائمة مع عكس الأثر المخزني والمالي بالكامل ───────────
+  // ─── 2️⃣ تحديث فاتورة بيع قائمة مع عكس الأثر المخزني والمالي بالكامل ───────────
   async updateInvoice(
     id: string,
     dto: CreateSalesInvoiceDto,
@@ -247,6 +248,11 @@ export class SalesInvoicesService {
           `Sales Invoice with ID "${id}" not found or inactive.`,
         );
       }
+
+      // 💾 حفظ قائمة الـ Product IDs الموجودة أصلاً في الفاتورة القديمة لتسهيل المقارنة والـ Bypass
+      const oldInvoiceProductIds = oldInvoice.items.map((item) =>
+        item.productId.toString(),
+      );
 
       // 2. ⏪ [عكس تأثير الفاتورة القديمة] ⏪
       // أ) إعادة كميات البضائع السابقة إلى المخزن (حركة تزويد مخزن)
@@ -287,13 +293,29 @@ export class SalesInvoicesService {
           );
         }
 
+        // 🧠 الحل الذكي: لو المنتج موجود بالفاتورة القديمة، نعمل Bypass لشرط الـ isActive
+        const isExistingProductInInvoice = oldInvoiceProductIds.includes(
+          item.productId.toString(),
+        );
+
+        const productFilter: Record<string, any> = {
+          _id: new Types.ObjectId(item.productId),
+        };
+
+        // نطبق شرط النشاط فقط لو المنتج جديد ولم يكن جزءاً من الفاتورة من قبل
+        if (!isExistingProductInInvoice) {
+          productFilter.isActive = true;
+        }
+
         const product = await this.productModel
-          .findOne({ _id: new Types.ObjectId(item.productId), isActive: true })
+          .findOne(productFilter)
           .session(session);
 
         if (!product) {
           throw new NotFoundException(
-            `Product with ID "${item.productId}" not found.`,
+            isExistingProductInInvoice
+              ? `Product with ID "${item.productId}" was found in the database but might have been hard-deleted.`
+              : `Product with ID "${item.productId}" not found or is currently Inactive.`,
           );
         }
 
@@ -385,7 +407,7 @@ export class SalesInvoicesService {
       }
 
       // 6. 📝 تحديث مستند الفاتورة نفسه وحفظ التعديلات
-      oldInvoice.customerId = customer._id;
+      oldInvoice.customerId = customer._id as any;
       oldInvoice.items = processedItems as any;
       oldInvoice.totalAmount = calculatedTotalAmount;
       oldInvoice.discount = dto.discount;
@@ -393,7 +415,10 @@ export class SalesInvoicesService {
       oldInvoice.paidAmount = paidAmount;
       oldInvoice.remainingAmount = remainingAmount;
       oldInvoice.paymentType = dto.paymentType;
-      oldInvoice.updatedBy = new Types.ObjectId(userId); // 👈 احذف "as any" من هنا
+
+      // ✨ تم معالجة وتفادي التنبيه والخط الأحمر الخاص بـ TypeScript بشكل سليم وآمن تماماً
+      oldInvoice.set('updatedBy', new Types.ObjectId(userId));
+
       const updatedInvoice = await oldInvoice.save({ session });
 
       await session.commitTransaction();
